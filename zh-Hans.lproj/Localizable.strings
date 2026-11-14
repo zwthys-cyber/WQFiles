@@ -966,3 +966,21 @@
 "Reset Access Cache: use it when folders stay empty or the startup check says sandbox access failed. It repairs WQ Files' own cache folder in its App Group; nothing is deleted." = "重置访问缓存：当文件夹一直为空，或启动检查显示沙盒访问失败时使用。它会修复 WQ Files 在其 App Group 中自己的缓存文件夹；不会删除任何内容。";
 "Access Cache Reset" = "访问缓存已重置";
 "The access cache was repaired. If folders still stay empty, send the Log." = "访问缓存已修复。如果文件夹仍然为空，请发送日志。";
+
+/* Apple Intelligence model diagnostics */
+"AI Model Resources" = "AI 模型资源";
+"Inspect model storage and access" = "检测模型占用和访问权限";
+"Scan Resources" = "扫描资源";
+"Copy Report" = "复制报告";
+"Report copied" = "报告已复制";
+"Candidate model locations only; this is not a complete Apple Intelligence inventory. No model files are changed. Size means logical file bytes, not reclaimable storage. Missing or inaccessible paths do not prove models are absent. Delete permission has not been tested." = "仅检测候选模型目录，不代表完整的 Apple Intelligence 资源清单。不会修改模型文件。大小为文件逻辑字节数，不等于可释放空间。路径不存在或无法访问不代表没有模型。尚未验证删除权限。";
+"Scanning resources…" = "正在扫描资源…";
+"Readable; scan completed" = "可以读取，扫描完成";
+"Readable; partial scan (limits, skipped entries or access errors)" = "可以读取，扫描不完整（达到限制、跳过项目或访问出错）";
+"Observed logical bytes:" = "已统计的逻辑字节数：";
+"Entries inspected:" = "已检测项目数：";
+"Directory write hint: allowed; deletion remains unverified" = "目录写入权限初检：允许；删除能力仍未验证";
+"Directory write hint: denied; deletion remains unverified" = "目录写入权限初检：拒绝；删除能力仍未验证";
+"Path not found; size unknown" = "路径不存在，占用未知";
+"Cannot inspect this path; size unknown" = "无法检测此路径，占用未知";
+"Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup." = "检测结束，未删除任何模型文件。当前 iOS 的实际路径可能不同，实现清理功能前需要根据真机报告确认。";

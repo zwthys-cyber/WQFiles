@@ -13,6 +13,7 @@
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 #import "WQAccess.h"
+#import "WQAIResources.h"
 #import "WQLaunchServices.h"
 #import "WQUI.h"
 #import "WQSharing.h"
@@ -49,6 +50,98 @@ static BOOL wq_regular_file_for_ui(NSString *path)
     // O_NOFOLLOW and the UI must offer the same contract.
     return S_ISREG(st.st_mode);
 }
+
+#pragma mark - Apple Intelligence resource diagnostics
+
+@interface WQAIResourcesViewController : UIViewController
+@end
+
+@implementation WQAIResourcesViewController {
+    UITextView *_report;
+    UIBarButtonItem *_scanButton;
+    UIBarButtonItem *_copyButton;
+}
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+    self.title = WQLocalized(@"AI Model Resources");
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    _report = [UITextView new];
+    _report.editable = NO;
+    _report.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    _report.adjustsFontForContentSizeCategory = YES;
+    _report.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_report];
+    [NSLayoutConstraint activateConstraints:@[
+        [_report.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [_report.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor],
+        [_report.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [_report.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12]
+    ]];
+    _scanButton = [[UIBarButtonItem alloc] initWithTitle:WQLocalized(@"Scan Resources")
+        style:UIBarButtonItemStylePlain target:self action:@selector(scanResources)];
+    _copyButton = [[UIBarButtonItem alloc] initWithTitle:WQLocalized(@"Copy Report")
+        style:UIBarButtonItemStylePlain target:self action:@selector(copyReport)];
+    self.navigationItem.rightBarButtonItems = @[_scanButton, _copyButton];
+    [self scanResources];
+}
+
+- (void)copyReport
+{
+    UIPasteboard.generalPasteboard.string = _report.text;
+    UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, WQLocalized(@"Report copied"));
+}
+
+- (void)scanResources
+{
+    _scanButton.enabled = NO;
+    _copyButton.enabled = NO;
+    NSString *intro = WQLocalized(@"Candidate model locations only; this is not a complete Apple Intelligence inventory. No model files are changed. Size means logical file bytes, not reclaimable storage. Missing or inaccessible paths do not prove models are absent. Delete permission has not been tested.");
+    struct utsname device;
+    uname(&device);
+    NSString *heading = [NSString stringWithFormat:@"%@\n%@ · iOS %@\n%@\n\n%@\n\n",
+        self.title, @(device.machine), UIDevice.currentDevice.systemVersion, wq_app_version_line(), intro];
+    _report.text = [heading stringByAppendingString:WQLocalized(@"Scanning resources…")];
+    dispatch_async(wq_io(), ^{
+        NSMutableString *report = [heading mutableCopy];
+        for (NSString *path in WQAICandidatePaths()) {
+            @autoreleasepool {
+                NSDictionary *item = WQAIInspectPath(path, 3.0, 25000);
+                [report appendFormat:@"%@\n", path];
+                NSString *status = item[@"status"];
+                if ([status isEqualToString:@"readable"]) {
+                    NSString *state = [item[@"complete"] boolValue] ? WQLocalized(@"Readable; scan completed")
+                        : WQLocalized(@"Readable; partial scan (limits, skipped entries or access errors)");
+                    [report appendFormat:@"%@\n%@ %@\n%@ %@\n", state,
+                        WQLocalized(@"Observed logical bytes:"), item[@"bytes"],
+                        WQLocalized(@"Entries inspected:"), item[@"entries"]];
+                    if (item[@"uid"]) [report appendFormat:@"UID %@ · mode %04o\n", item[@"uid"], [item[@"mode"] unsignedIntValue]];
+                    [report appendFormat:@"%@\n", [item[@"writeHint"] boolValue]
+                        ? WQLocalized(@"Directory write hint: allowed; deletion remains unverified")
+                        : WQLocalized(@"Directory write hint: denied; deletion remains unverified")];
+                } else {
+                    [report appendFormat:@"%@\n", [status isEqualToString:@"notFound"]
+                        ? WQLocalized(@"Path not found; size unknown") : WQLocalized(@"Cannot inspect this path; size unknown")];
+                }
+                if ([item[@"errno"] intValue]) [report appendFormat:@"errno %@\n", item[@"errno"]];
+                [report appendString:@"\n"];
+                NSString *snapshot = [report copy];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self->_report.text = [snapshot stringByAppendingString:WQLocalized(@"Scanning resources…")];
+                });
+            }
+        }
+        [report appendString:WQLocalized(@"Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup.")];
+        NSString *finished = [report copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_report.text = finished;
+            self->_scanButton.enabled = YES;
+            self->_copyButton.enabled = YES;
+        });
+    });
+}
+@end
 
 #pragma mark - Item
 
@@ -4719,6 +4812,10 @@ static void wq_apply_design(void);
                                                              tone:@"violet"
                                                          selector:@selector(openSystemGroups)]];
     }
+    hasRows = YES;
+    [_systemRows addArrangedSubview:[self systemRowWithTitle:WQLocalized(@"AI Model Resources")
+        subtitle:WQLocalized(@"Inspect model storage and access") symbol:@"sparkles" tone:@"indigo"
+        selector:@selector(openAIResources)]];
     _systemSection.hidden = !hasRows;
 }
 
@@ -4813,6 +4910,11 @@ static void wq_apply_design(void);
 {
     WQDirViewController *dir = [[WQDirViewController alloc] initWithPath:path title:title];
     [self.navigationController pushViewController:dir animated:YES];
+}
+
+- (void)openAIResources
+{
+    [self.navigationController pushViewController:[WQAIResourcesViewController new] animated:YES];
 }
 
 - (void)openSystemData
@@ -5681,7 +5783,7 @@ static NSString *const kWQTroubleshootingFooter =
     // System Groups is the extra last row, on iOS 27 only.
     if (section == 3) return 1;
     if (section == 2) return 7;
-    return section == 0 ? (NSInteger)_locations.count + (wq_system_areas_reachable() ? 1 : 0) : 8;
+    return section == 0 ? (NSInteger)_locations.count + (wq_system_areas_reachable() ? 1 : 0) : 9;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section
@@ -5767,7 +5869,7 @@ static NSString *const kWQTroubleshootingFooter =
     } else {
         NSArray *tools = @[@[@"Apps", @"square.grid.3x3"], @[@"Cache Cleaner", @"trash"], @[@"Go to Path…", @"arrow.right.circle"],
                            @[@"App Backups", @"clock.arrow.circlepath"], @[@"Backups", @"clock.arrow.circlepath"],
-                           @[@"Recently Deleted", @"trash.circle"], @[@"Log", @"doc.plaintext"], @[@"Favorites", @"star"]];
+                           @[@"Recently Deleted", @"trash.circle"], @[@"Log", @"doc.plaintext"], @[@"Favorites", @"star"], @[@"AI Model Resources", @"sparkles"]];
         c.text = WQLocalizedNullable(tools[(NSUInteger)indexPath.row][0]);
         c.image = [UIImage systemImageNamed:tools[(NSUInteger)indexPath.row][1]];
     }
@@ -5810,6 +5912,8 @@ static NSString *const kWQTroubleshootingFooter =
         next = [[WQDirViewController alloc] initWithPath:wq_backup_root() title:WQLocalizedNullable(@"Backups")];
     } else if (indexPath.row == 5) {
         next = [WQRecentlyDeletedViewController new];
+    } else if (indexPath.row == 8) {
+        next = [WQAIResourcesViewController new];
     } else if (indexPath.row == 7) {
         next = [WQFavoritesViewController new];
     } else {

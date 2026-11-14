@@ -324,3 +324,27 @@ welcome.
   ([#40](https://github.com/kolbicz/WQFiles/pull/40)).
 
 WQ Files is GPL-3.0-or-later (see `LICENSE`).
+
+## Fork: AI model resource diagnostics (build 89)
+
+Open **AI Model Resources** under System on the new Home screen, or under
+Tools in the classic design. The page inspects candidate GenerativeModels
+and Visual asset directories, displays logical file bytes, partial-scan
+status, numeric access errors, and a directory-write permission hint. Copy
+Report includes the device identifier, OS and app version, and candidate
+paths; it does not include model contents or personal application files.
+
+This is a diagnostic build, not an AI model remover. Paths are candidates
+based on iOS asset naming and may differ on iOS 27.0.1. Missing or denied
+paths have unknown size. Scans skip symlinks and special files and stop at
+3 seconds, 25,000 entries or 32 levels per candidate after initial access
+acquisition. Logical sizes are not estimates of reclaimable space; hard
+links, clones and aliases can affect accounting. No combined total is shown.
+No model files are created, overwritten or deleted. The existing sandbox
+access routine may temporarily swap this app's own App Group cache directory.
+Write hints do not establish delete access and are never used to enable a
+delete action. System/preinstalled resources are included for diagnosis only.
+
+GitHub Actions runs disposable filesystem fixtures and the upstream regression
+suite before building the IPA. Actual path coverage, token issuance and
+permissions on an iPhone require the on-device report; CI cannot validate them.

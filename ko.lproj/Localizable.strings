@@ -966,3 +966,21 @@
 "Reset Access Cache: use it when folders stay empty or the startup check says sandbox access failed. It repairs WQ Files' own cache folder in its App Group; nothing is deleted." = "접근 캐시 재설정: 폴더가 계속 비어 있거나 시작 검사에서 샌드박스 접근 실패가 표시될 때 사용하세요. App Group에 있는 WQ Files 자체 캐시 폴더를 복구하며, 아무것도 삭제되지 않습니다.";
 "Access Cache Reset" = "접근 캐시 재설정됨";
 "The access cache was repaired. If folders still stay empty, send the Log." = "접근 캐시를 복구했습니다. 폴더가 여전히 비어 있으면 로그를 보내 주세요.";
+
+/* Apple Intelligence model diagnostics */
+"AI Model Resources" = "AI Model Resources";
+"Inspect model storage and access" = "Inspect model storage and access";
+"Scan Resources" = "Scan Resources";
+"Copy Report" = "Copy Report";
+"Report copied" = "Report copied";
+"Candidate model locations only; this is not a complete Apple Intelligence inventory. No model files are changed. Size means logical file bytes, not reclaimable storage. Missing or inaccessible paths do not prove models are absent. Delete permission has not been tested." = "Candidate model locations only; this is not a complete Apple Intelligence inventory. No model files are changed. Size means logical file bytes, not reclaimable storage. Missing or inaccessible paths do not prove models are absent. Delete permission has not been tested.";
+"Scanning resources…" = "Scanning resources…";
+"Readable; scan completed" = "Readable; scan completed";
+"Readable; partial scan (limits, skipped entries or access errors)" = "Readable; partial scan (limits, skipped entries or access errors)";
+"Observed logical bytes:" = "Observed logical bytes:";
+"Entries inspected:" = "Entries inspected:";
+"Directory write hint: allowed; deletion remains unverified" = "Directory write hint: allowed; deletion remains unverified";
+"Directory write hint: denied; deletion remains unverified" = "Directory write hint: denied; deletion remains unverified";
+"Path not found; size unknown" = "Path not found; size unknown";
+"Cannot inspect this path; size unknown" = "Cannot inspect this path; size unknown";
+"Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup." = "Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup.";

@@ -966,3 +966,21 @@
 "Reset Access Cache: use it when folders stay empty or the startup check says sandbox access failed. It repairs WQ Files' own cache folder in its App Group; nothing is deleted." = "Сбросить кэш доступа: используйте, если папки остаются пустыми или проверка при запуске сообщает, что доступ к песочнице не удался. Восстанавливает собственную папку кэша WQ Files в её App Group; ничего не удаляется.";
 "Access Cache Reset" = "Кэш доступа сброшен";
 "The access cache was repaired. If folders still stay empty, send the Log." = "Кэш доступа восстановлен. Если папки по-прежнему пусты, отправьте журнал.";
+
+/* Apple Intelligence model diagnostics */
+"AI Model Resources" = "AI Model Resources";
+"Inspect model storage and access" = "Inspect model storage and access";
+"Scan Resources" = "Scan Resources";
+"Copy Report" = "Copy Report";
+"Report copied" = "Report copied";
+"Candidate model locations only; this is not a complete Apple Intelligence inventory. No model files are changed. Size means logical file bytes, not reclaimable storage. Missing or inaccessible paths do not prove models are absent. Delete permission has not been tested." = "Candidate model locations only; this is not a complete Apple Intelligence inventory. No model files are changed. Size means logical file bytes, not reclaimable storage. Missing or inaccessible paths do not prove models are absent. Delete permission has not been tested.";
+"Scanning resources…" = "Scanning resources…";
+"Readable; scan completed" = "Readable; scan completed";
+"Readable; partial scan (limits, skipped entries or access errors)" = "Readable; partial scan (limits, skipped entries or access errors)";
+"Observed logical bytes:" = "Observed logical bytes:";
+"Entries inspected:" = "Entries inspected:";
+"Directory write hint: allowed; deletion remains unverified" = "Directory write hint: allowed; deletion remains unverified";
+"Directory write hint: denied; deletion remains unverified" = "Directory write hint: denied; deletion remains unverified";
+"Path not found; size unknown" = "Path not found; size unknown";
+"Cannot inspect this path; size unknown" = "Cannot inspect this path; size unknown";
+"Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup." = "Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup.";
