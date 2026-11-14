@@ -3,6 +3,38 @@
 #import <dirent.h>
 #import <errno.h>
 
+@interface WQCatalogFixture : NSObject
+- (instancetype)initWithType:(NSString *)type;
+- (long long)queryMetaDataSync;
+- (NSArray *)results;
+@end
+@implementation WQCatalogFixture {
+    NSString *_type;
+}
+- (instancetype)initWithType:(NSString *)type
+{
+    if ((self = [super init])) _type = [type copy];
+    return self;
+}
+- (long long)queryMetaDataSync
+{
+    if ([_type isEqual:@"exception"]) [NSException raise:@"fixture" format:@"expected"];
+    return [_type isEqual:@"denied"] ? 42 : 0;
+}
+- (NSArray *)results { return @[@"catalog fixture", @"not proof of installation"]; }
+@end
+
+@interface WQWrongCatalogABI : NSObject
+- (instancetype)initWithType:(NSString *)type;
+- (id)queryMetaDataSync;
+- (NSArray *)results;
+@end
+@implementation WQWrongCatalogABI
+- (instancetype)initWithType:(NSString *__unused)type { return [super init]; }
+- (id)queryMetaDataSync { [NSException raise:@"unsafe" format:@"must never call incompatible ABI"]; return nil; }
+- (NSArray *)results { return @[]; }
+@end
+
 // Access double: exercise real disposable files without issuing tokens.
 NSArray<NSString *> *wq_list(NSString *path, NSString **errorText)
 {
@@ -17,6 +49,14 @@ NSArray<NSString *> *wq_list(NSString *path, NSString **errorText)
 int main(void)
 {
     @autoreleasepool {
+        NSDictionary *catalog = WQAIQueryCatalogClass(WQCatalogFixture.class, @"ok");
+        NSCAssert([catalog[@"code"] longLongValue] == 0 && [catalog[@"catalogCount"] intValue] == 2, @"catalog count");
+        NSDictionary *refused = WQAIQueryCatalogClass(WQCatalogFixture.class, @"denied");
+        NSCAssert([refused[@"code"] intValue] == 42 && !refused[@"catalogCount"], @"preserve rejection without empty count");
+        NSCAssert([WQAIQueryCatalogClass(WQCatalogFixture.class, @"exception")[@"status"] isEqual:@"exception"], @"exception handled");
+        NSCAssert([WQAIQueryCatalogClass(Nil, @"missing")[@"status"] isEqual:@"unsupported"], @"framework missing");
+        NSCAssert([WQAIQueryCatalogClass(NSObject.class, @"missing")[@"status"] isEqual:@"unsupported"], @"selectors missing");
+        NSCAssert([WQAIQueryCatalogClass(WQWrongCatalogABI.class, @"wrong")[@"status"] isEqual:@"unsupported"], @"ABI mismatch refused");
         NSFileManager *fm = NSFileManager.defaultManager;
         NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
         NSString *nested = [root stringByAppendingPathComponent:@"nested"];

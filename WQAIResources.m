@@ -4,6 +4,82 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <errno.h>
+#import <dlfcn.h>
+#import <objc/runtime.h>
+
+@protocol WQAIMetadataQuery <NSObject>
+- (instancetype)initWithType:(NSString *)type;
+- (long long)queryMetaDataSync;
+- (NSArray *)results;
+@end
+
+static BOOL WQAIMethodMatches(Class cls, SEL selector, NSUInteger count, const char *returnType, BOOL objectArgument)
+{
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!method) return NO;
+    NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(method)];
+    if (sig.numberOfArguments != count || strcmp(sig.methodReturnType, returnType)) return NO;
+    return !objectArgument || !strcmp([sig getArgumentTypeAtIndex:2], @encode(id));
+}
+
+NSDictionary *WQAIQueryCatalogClass(Class queryClass, NSString *assetType)
+{
+    NSMutableDictionary *result = [@{@"type": assetType} mutableCopy];
+    if (!queryClass ||
+        !WQAIMethodMatches(queryClass, @selector(initWithType:), 3, @encode(id), YES) ||
+        !WQAIMethodMatches(queryClass, @selector(queryMetaDataSync), 2, @encode(long long), NO) ||
+        !WQAIMethodMatches(queryClass, @selector(results), 2, @encode(id), NO)) {
+        result[@"status"] = @"unsupported";
+        return result;
+    }
+    @try {
+        id<WQAIMetadataQuery> query = [(id<WQAIMetadataQuery>)[queryClass alloc] initWithType:assetType];
+        if (!query) { result[@"status"] = @"unavailable"; return result; }
+        long long code = [query queryMetaDataSync];
+        result[@"code"] = @(code);
+        // Keep the raw private API code: mappings can change across OS builds.
+        result[@"status"] = @"returned";
+        if (code == 0) {
+            id records = [query results];
+            if ([records isKindOfClass:NSArray.class]) result[@"catalogCount"] = @([records count]);
+        }
+    } @catch (NSException *__unused exception) {
+        result[@"status"] = @"exception";
+    }
+    return result;
+}
+
+void WQAIQueryCatalog(void (^completion)(NSArray<NSDictionary *> *results))
+{
+    static dispatch_semaphore_t gate;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ gate = dispatch_semaphore_create(1); });
+    if (dispatch_semaphore_wait(gate, DISPATCH_TIME_NOW) != 0) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(@[@{@"status": @"busy"}]); });
+        return;
+    }
+    // Only the main queue touches delivered; late results cannot replace timeout.
+    __block BOOL delivered = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 12 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (!delivered) { delivered = YES; completion(@[@{@"status": @"timeout"}]); }
+    });
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @autoreleasepool {
+            // Keep the framework loaded while any ObjC objects may still exist.
+            static void *framework;
+            if (!framework) framework = dlopen("/System/Library/PrivateFrameworks/MobileAsset.framework/MobileAsset", RTLD_LAZY | RTLD_LOCAL);
+            NSMutableArray *results = [NSMutableArray new];
+            Class cls = framework ? NSClassFromString(@"MAAssetQuery") : Nil;
+            for (NSString *type in @[@"com.apple.MobileAsset.UAF.FM.GenerativeModels", @"com.apple.MobileAsset.UAF.FM.Visual"])
+                [results addObject:WQAIQueryCatalogClass(cls, type)];
+            NSArray *snapshot = [results copy];
+            dispatch_semaphore_signal(gate);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!delivered) { delivered = YES; completion(snapshot); }
+            });
+        }
+    });
+}
 
 NSArray<NSString *> *WQAICandidatePaths(void)
 {

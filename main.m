@@ -135,9 +135,29 @@ static BOOL wq_regular_file_for_ui(NSString *path)
         [report appendString:WQLocalized(@"Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup.")];
         NSString *finished = [report copy];
         dispatch_async(dispatch_get_main_queue(), ^{
-            self->_report.text = finished;
-            self->_scanButton.enabled = YES;
-            self->_copyButton.enabled = YES;
+            self->_report.text = [finished stringByAppendingFormat:@"\n\n%@", WQLocalized(@"Querying system asset catalog…")];
+            WQAIQueryCatalog(^(NSArray<NSDictionary *> *results) {
+                NSMutableString *text = [finished mutableCopy];
+                [text appendFormat:@"\n\n%@\n%@\n", WQLocalized(@"System Asset Catalog"),
+                    WQLocalized(@"Metadata query only. Catalog entries are not installed-model counts. A successful query does not establish permission to delete models. No download or purge is requested.")];
+                NSDictionary *states = @{
+                    @"returned": WQLocalized(@"Query returned; see raw result code"),
+                    @"unsupported": WQLocalized(@"Private query interface unavailable or incompatible"),
+                    @"unavailable": WQLocalized(@"Could not create system asset query"),
+                    @"exception": WQLocalized(@"System asset query raised an exception"),
+                    @"timeout": WQLocalized(@"Query timed out; underlying request may still be running"),
+                    @"busy": WQLocalized(@"Previous system query is still running; restart the app before retrying")
+                };
+                for (NSDictionary *item in results) {
+                    if (item[@"type"]) [text appendFormat:@"\n%@\n", item[@"type"]];
+                    [text appendFormat:@"%@\n", states[item[@"status"]] ?: item[@"status"]];
+                    if (item[@"code"]) [text appendFormat:@"MAQueryResult: %@\n", item[@"code"]];
+                    if (item[@"catalogCount"]) [text appendFormat:@"%@ %@\n", WQLocalized(@"Catalog entry count:"), item[@"catalogCount"]];
+                }
+                self->_report.text = text;
+                self->_scanButton.enabled = YES;
+                self->_copyButton.enabled = YES;
+            });
         });
     });
 }

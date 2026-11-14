@@ -348,3 +348,34 @@ delete action. System/preinstalled resources are included for diagnosis only.
 GitHub Actions runs disposable filesystem fixtures and the upstream regression
 suite before building the IPA. Actual path coverage, token issuance and
 permissions on an iPhone require the on-device report; CI cannot validate them.
+
+### Build 90: system asset catalog probe
+
+After filesystem inspection, the report now asks MobileAsset for metadata for
+`com.apple.MobileAsset.UAF.FM.GenerativeModels` and
+`com.apple.MobileAsset.UAF.FM.Visual`. This tests a separate hypothesis:
+filesystem denial does not by itself establish whether the system service
+allows a metadata query. It does not assume query access implies purge access.
+
+The probe dynamically loads the framework and checks Objective-C signatures
+before calling `initWithType:`, `queryMetaDataSync`, and `results`. It preserves
+raw result codes without assigning undocumented permission meanings. Catalog
+entry counts are not installed-model counts. There are no download, purge,
+configuration, subscription or model-write calls. A 12-second UI timeout does
+not cancel a blocked system call; a single-flight gate prevents repeat workers
+until the original returns. Missing methods, exceptions and incompatible ABIs
+are reported. Runtime signature checks cannot guarantee private API behavior
+on an untested iOS release.
+
+Research references:
+- [worse_query supported paths](https://github.com/forcequitOS/worse_query#readme)
+  do not list `/var/MobileAsset`.
+- [Apple trustd source](https://github.com/apple-oss-distributions/Security/blob/main/trust/trustd/OTATrustUtilities.m)
+  demonstrates metadata queries and purge for trust assets in a system process;
+  it does not establish privileges for a side-loaded app or AI asset families.
+- [MAAssetQuery runtime header](https://github.com/nst/iOS-Runtime-Headers/blob/master/PrivateFrameworks/MobileAsset.framework/MAAssetQuery.h)
+  is historical interface evidence, not a guarantee for iOS 27.0.1.
+
+Build 89 device feedback (iOS 27.0.1) denied both downloaded model candidate
+paths with EPERM and returned ENOENT for the other six candidates. Build 90
+therefore remains diagnostic; AI cleanup is not implemented or verified.

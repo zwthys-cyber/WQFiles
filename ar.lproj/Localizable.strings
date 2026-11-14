@@ -980,3 +980,15 @@
 "Path not found; size unknown" = "Path not found; size unknown";
 "Cannot inspect this path; size unknown" = "Cannot inspect this path; size unknown";
 "Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup." = "Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup.";
+
+/* System asset catalog diagnostics */
+"Querying system asset catalog…" = "Querying system asset catalog…";
+"System Asset Catalog" = "System Asset Catalog";
+"Metadata query only. Catalog entries are not installed-model counts. A successful query does not establish permission to delete models. No download or purge is requested." = "Metadata query only. Catalog entries are not installed-model counts. A successful query does not establish permission to delete models. No download or purge is requested.";
+"Query returned; see raw result code" = "Query returned; see raw result code";
+"Private query interface unavailable or incompatible" = "Private query interface unavailable or incompatible";
+"Could not create system asset query" = "Could not create system asset query";
+"System asset query raised an exception" = "System asset query raised an exception";
+"Query timed out; underlying request may still be running" = "Query timed out; underlying request may still be running";
+"Previous system query is still running; restart the app before retrying" = "Previous system query is still running; restart the app before retrying";
+"Catalog entry count:" = "Catalog entry count:";

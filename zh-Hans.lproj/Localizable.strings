@@ -984,3 +984,15 @@
 "Path not found; size unknown" = "路径不存在，占用未知";
 "Cannot inspect this path; size unknown" = "无法检测此路径，占用未知";
 "Inspection finished. No model files were deleted. Candidate paths may differ on this iOS version; device results are required before implementing cleanup." = "检测结束，未删除任何模型文件。当前 iOS 的实际路径可能不同，实现清理功能前需要根据真机报告确认。";
+
+/* System asset catalog diagnostics */
+"Querying system asset catalog…" = "正在查询系统资源目录…";
+"System Asset Catalog" = "系统资源目录查询";
+"Metadata query only. Catalog entries are not installed-model counts. A successful query does not establish permission to delete models. No download or purge is requested." = "仅查询资源元数据。目录条目数不等于已安装模型数。查询成功不代表有权删除模型。不会请求下载或清理。";
+"Query returned; see raw result code" = "查询已返回，请查看原始返回码";
+"Private query interface unavailable or incompatible" = "私有查询接口不可用或签名不兼容";
+"Could not create system asset query" = "无法创建系统资源查询";
+"System asset query raised an exception" = "系统资源查询发生异常";
+"Query timed out; underlying request may still be running" = "查询超时，底层请求可能仍在运行";
+"Previous system query is still running; restart the app before retrying" = "上次系统查询尚未返回，请重新启动应用后再试";
+"Catalog entry count:" = "资源目录条目数：";
