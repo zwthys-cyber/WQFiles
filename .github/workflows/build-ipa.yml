@@ -11,7 +11,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Show build environment
         run: |
           xcodebuild -version
@@ -22,7 +22,7 @@ jobs:
       - name: Create checksum
         run: shasum -a 256 WQFiles.ipa > WQFiles.ipa.sha256
       - name: Upload IPA for re-signing
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: WQFiles-IPA
           path: |
@@ -32,7 +32,7 @@ jobs:
           retention-days: 90
       - name: Upload test logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: build-test-logs
           path: .work/tests/**/*.log
