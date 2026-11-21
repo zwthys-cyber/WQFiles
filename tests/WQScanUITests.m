@@ -170,5 +170,9 @@ static NSDictionary *result(void)
 @end
 int main(int argc, char *argv[])
 {
-    @autoreleasepool { return UIApplicationMain(argc, argv, nil, NSStringFromClass(TestApp.class)); }
+    @autoreleasepool {
+        // Mirror production main bootstrap; this fixture has no full-scan background lease.
+        wq_scan_lifecycle_install(NULL);
+        return UIApplicationMain(argc, argv, nil, NSStringFromClass(TestApp.class));
+    }
 }
