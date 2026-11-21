@@ -10,7 +10,7 @@ mkdir -p "$APP"
 SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
 # Use deterministic per-directory slices for the small scheduling fixture.
 # Production builds retain the normal time-based slice.
-FLAGS=(-DWQ_ACCESS_TESTING=1 -fobjc-arc -fmodules "-fmodules-cache-path=$OUT/modules" -target arm64-apple-ios26.0-simulator -isysroot "$SDK" -Wall -Wextra -Werror -O1)
+FLAGS=(-DWQ_MEASURE_TESTING=1 -fobjc-arc -fmodules "-fmodules-cache-path=$OUT/modules" -target arm64-apple-ios26.0-simulator -isysroot "$SDK" -Wall -Wextra -Werror -O1)
 xcrun --sdk iphonesimulator clang "${FLAGS[@]}" -Dmain=WQProductionMain -c main.m -o "$OUT/main.o"
 xcrun --sdk iphonesimulator clang "${FLAGS[@]}" -framework UIKit -framework Foundation -framework Security -framework UniformTypeIdentifiers -framework JavaScriptCore -lsqlite3 -lz \
     WQCore.m WQAIResources.m WQAccess.m WQScanTask.m WQLocalization.m WQLaunchServices.m WQUI.m WQSharing.m WQApps.m WQCache.m WQPlistEditor.m WQHexViewer.m WQSQLiteViewer.m WQSQLiteSave.m WQHealth.m WQTrash.m WQArchive.m WQSyntax.m WQMediaStream.m WQWebServer.m WQTheme.m WQInspector.m tests/WQScanUITests.m "$OUT/main.o" -o "$APP/WQScanUITests"

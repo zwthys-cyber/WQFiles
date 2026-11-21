@@ -3397,7 +3397,7 @@ static NSArray *wq_measure_identity(const struct stat *st)
 // One trip to the mutation queue measures directories for up to this long
 // (one directory per trip in the tests), so writes can still run in between
 // without a queue hop for every directory.
-#ifdef WQ_ACCESS_TESTING
+#if defined(WQ_ACCESS_TESTING) || defined(WQ_MEASURE_TESTING)
 static const NSTimeInterval kWQMeasureSaveInterval = 0;
 static const NSTimeInterval kWQMeasureSlice = 0;
 #else
