@@ -25,7 +25,7 @@ function inspect(input) {
     else if (typeof version === "number" && Number.isSafeInteger(version) && version >= 0) versionStatus = String(version);
     else versionStatus = "存在但格式不匹配（内容隐藏）";
   }
-  rows.push({ label: "缓存宿主版本", value: versionStatus });
+  rows.push({ label: "推送 SDK 版本标识（非抖音版本）", value: versionStatus });
   const timeKey = "BDUGPushUploadTokenTimestampKey";
   let timeStatus = "未找到";
   if (own(timeKey)) {
