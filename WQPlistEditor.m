@@ -100,7 +100,8 @@ static id wqp_default(WQPType t)
         case WQPTypeInteger: return @0;
         case WQPTypeReal: return @0.0;
         case WQPTypeBoolean: return @NO;
-        case WQPTypeDate: return NSDate.date;
+        // Whole seconds: an XML property list can't store a fraction.
+        case WQPTypeDate: return [NSDate dateWithTimeIntervalSinceReferenceDate:floor(NSDate.date.timeIntervalSinceReferenceDate)];
         case WQPTypeData: return [NSData data];
         case WQPTypeDictionary: return [NSMutableDictionary dictionary];
         case WQPTypeArray: return [NSMutableArray array];
@@ -199,7 +200,13 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *error = nil;
         NSDictionary *__unused before = wq_file_version(path);
-        NSData *data = wq_read(path, WQPMaxSerializedBytes, &error);
+        // One byte over the limit: a larger file is refused, not read in
+        // part (a valid XML prefix would parse and later overwrite it; DR-39).
+        NSData *data = wq_read(path, WQPMaxSerializedBytes + 1, &error);
+        if (data.length > WQPMaxSerializedBytes) {
+            data = nil;
+            error = WQLocalizedFormat(@"The property list is too large to edit (maximum %lu MiB).", (unsigned long)(WQPMaxSerializedBytes / (1024 * 1024)));
+        }
         NSDictionary *version = wq_file_version(path);
         if (data && (!before || ![before isEqualToDictionary:version])) {
             data = nil;
@@ -386,6 +393,8 @@ static void wqp_alert(UIViewController *host, NSString *title, NSString *message
                                                                                       error:&serializationError] : nil;
             if (!snapshot) {
                 writeError = copyError ?: WQLocalized(@"The edited property list contains an unsupported value.");
+            } else if (format == NSPropertyListXMLFormat_v1_0 && WQPHasFractionalDate(snapshot)) {
+                writeError = WQLocalized(@"This XML property list can only store dates to the second, and a date here has a fraction of a second. Remove the fraction from the date, then save again. Nothing was saved.");
             } else if (!data) {
                 writeError = serializationError.localizedDescription ?: WQLocalized(@"The edited property list is not valid.");
             } else if (!WQPSerializedDataWithinLimit(data)) {

@@ -136,6 +136,33 @@ int main(int argc, const char *argv[])
               [fm copyItemAtPath:[backedMain stringByAppendingString:@"-wal"] toPath:[restored2 stringByAppendingString:@"-wal"] error:nil],
               @"restore the whole unit");
         check([restoredTexts(restored2) isEqualToArray:@[@"one", @"two", @"three, only in the WAL"]], @"whole-unit restore has all pre-save rows");
+        // DR-02: restore only the backed-up main file over a live database
+        // whose -wal holds newer frames, the way the file browser does.
+        NSString *live = [base stringByAppendingPathComponent:@"live/app.sqlite"];
+        [fm createDirectoryAtPath:live.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+        makeAppDB(live);
+        {
+            sqlite3 *ldb = NULL;
+            check(sqlite3_open(live.fileSystemRepresentation, &ldb) == SQLITE_OK, @"open live database");
+            exec(ldb, "PRAGMA wal_autocheckpoint=0; INSERT INTO notes(text) VALUES ('four, newer than the backup')");
+            sqlite3_db_config(ldb, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, NULL);
+            sqlite3_close(ldb);
+        }
+        check(sizeOf([live stringByAppendingString:@"-wal"]) > 0, @"live database has newer WAL frames");
+        NSString *restoreError = nil, *mainUnit = nil;
+        check(wq_write_from_file_with_backup(live, backedMain, &mainUnit, &restoreError), @"write the backup's main file back");
+        NSMutableArray *sideUnits = [NSMutableArray new];
+        check(wq_sqlite_restore_sidecars(live, backedMain, sideUnits, &restoreError),
+              [@"sidecars handled " stringByAppendingString:restoreError ?: @""]);
+        check(sizeOf([live stringByAppendingString:@"-wal"]) == 0, @"live -wal replaced by the backup's empty one");
+        check(sideUnits.count >= 1, @"the newer -wal is kept in Backups");
+        check([restoredTexts(live) isEqualToArray:@[@"one", @"two", @"three, only in the WAL"]],
+              @"restored database has the backup's rows, not the newer WAL's");
+        NSString *plain = [base stringByAppendingPathComponent:@"plain.txt"];
+        [@"x" writeToFile:plain atomically:NO encoding:NSUTF8StringEncoding error:nil];
+        [@"y" writeToFile:[plain stringByAppendingString:@"-wal"] atomically:NO encoding:NSUTF8StringEncoding error:nil];
+        check(wq_sqlite_restore_sidecars(plain, plain, nil, NULL) && sizeOf([plain stringByAppendingString:@"-wal"]) == 1,
+              @"files that aren't SQLite databases keep their -wal namesakes");
         check(after && ![after isEqualToDictionary:state], @"new state returned for the next save");
 
         // A second edit saves against the new state.

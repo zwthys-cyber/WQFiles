@@ -4,6 +4,7 @@
 #define WQ_ACCESS_TESTING 1
 #import "../WQAccess.m"
 #import "../WQTrash.m"
+#import "../WQSQLiteSave.m"
 #include <stdlib.h>
 #include <sys/stat.h>
 SecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator) { (void)allocator; return NULL; }

@@ -43,6 +43,15 @@ static inline NSString *_Nullable wq_sqlite_exact_text(const unsigned char *_Nul
     return s;
 }
 
+// A REAL as text that reads back to the same double (review DR-29): 15
+// digits when they round-trip (0.1 stays "0.1"), else the 17 that always do.
+static inline NSString *wq_sqlite_real_text(double value)
+{
+    NSString *text = [NSString stringWithFormat:@"%.15g", value];
+    if (strtod(text.UTF8String, NULL) == value) return text;
+    return [NSString stringWithFormat:@"%.17g", value];
+}
+
 // A column value as display text; `full` shows long text and blobs in more
 // detail. *kind gets the SQLite type, or WQSQLiteTextRaw (see above).
 static inline NSString *wq_sqlite_value(sqlite3_stmt *stmt, int column, BOOL full, int *_Nullable kind)
@@ -52,7 +61,7 @@ static inline NSString *wq_sqlite_value(sqlite3_stmt *stmt, int column, BOOL ful
     switch (type) {
         case SQLITE_NULL: return WQLocalized(@"NULL");
         case SQLITE_INTEGER: return [NSString stringWithFormat:@"%lld", sqlite3_column_int64(stmt, column)];
-        case SQLITE_FLOAT: return [NSString stringWithFormat:@"%.15g", sqlite3_column_double(stmt, column)];
+        case SQLITE_FLOAT: return wq_sqlite_real_text(sqlite3_column_double(stmt, column));
         case SQLITE_BLOB: {
             const uint8_t *bytes = sqlite3_column_blob(stmt, column);
             int length = sqlite3_column_bytes(stmt, column);

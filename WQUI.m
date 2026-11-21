@@ -5,8 +5,11 @@
 //
 
 #import "WQUI.h"
+#import "WQScanTask.h"
+#import "WQTheme.h"
 #import "WQAccess.h"
 #import "WQLaunchServices.h"
+#import "WQStoreIconsSupport.h"
 #import <fcntl.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
@@ -95,21 +98,69 @@ static UIImage *wq_raw_icon(NSString *bundleID)
     return [UIImage _applicationIconImageForBundleIdentifier:bundleID format:2 scale:scale];
 }
 
+// YES when two fingerprints are near-identical (small rendering differences).
+static BOOL wq_icon_fingerprints_match(NSData *a, NSData *b)
+{
+    if (!a || !b || a.length != b.length) return NO;
+    const uint8_t *x = a.bytes, *y = b.bytes;
+    unsigned long diff = 0;
+    for (NSUInteger i = 0; i < a.length; i++) diff += (unsigned long)abs((int)x[i] - (int)y[i]);
+    return diff / a.length < 8;
+}
+
+// iOS's placeholder is a flat grey square with a faint grid: no colour and
+// almost no contrast. Real icons, even grey ones like Settings, have strong
+// contrast (measured: placeholder sd 8–9, Settings 33–42).
+static BOOL wq_icon_fingerprint_looks_blank(NSData *fp)
+{
+    const uint8_t *p = fp.bytes;
+    double sum = 0, squares = 0;
+    NSUInteger n = 0;
+    for (NSUInteger i = 0; i + 3 < fp.length; i += 4) {
+        if (p[i + 3] < 200) continue;   // rounded corners
+        int r = p[i], g = p[i + 1], b = p[i + 2];
+        if (MAX(r, MAX(g, b)) - MIN(r, MIN(g, b)) > 6) return NO;   // coloured
+        double l = 0.299 * r + 0.587 * g + 0.114 * b;
+        sum += l;
+        squares += l * l;
+        n++;
+    }
+    if (n < 40) return NO;
+    double mean = sum / (double)n;
+    return sqrt(MAX(0.0, squares / (double)n - mean * mean)) < 16;
+}
+
 // The real icon for bundleID, or nil when iOS only has its placeholder.
+// iOS draws the placeholder light or dark depending on the appearance at the
+// time, so every variant seen is remembered: a blank-looking icon that matches
+// none is compared with the placeholder iOS draws right now.
 static UIImage *wq_real_icon(NSString *bundleID)
 {
-    static NSData *placeholder;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ placeholder = wq_icon_fingerprint(wq_raw_icon(@"cz.kolbi.wqfiles.no-such-app")); });
+    // Not dispatch_once: off the main thread UIKit's icon call waits for the
+    // main thread, so a background icon warm-up inside a once-block while a
+    // table cell on the main thread waited for the same block deadlocked
+    // (frozen UI, then a watchdog kill). UIKit is only called outside the
+    // lock; the lock only guards the list.
+    static NSMutableArray<NSData *> *placeholders;
+    static NSObject *guard;
+    static dispatch_once_t guardOnce;   // only allocates, never calls UIKit
+    dispatch_once(&guardOnce, ^{ guard = [NSObject new]; placeholders = [NSMutableArray new]; });
     UIImage *raw = wq_raw_icon(bundleID);
     if (!raw || !raw.CGImage) return nil;
     NSData *fp = wq_icon_fingerprint(raw);
-    if (!placeholder || fp.length != placeholder.length) return raw;
-    // Near-identical to the placeholder (allow small rendering differences).
-    const uint8_t *a = fp.bytes, *b = placeholder.bytes;
-    unsigned long diff = 0;
-    for (NSUInteger i = 0; i < fp.length; i++) diff += (unsigned long)abs((int)a[i] - (int)b[i]);
-    return diff / fp.length < 8 ? nil : raw;
+    if (!fp) return raw;
+    NSArray<NSData *> *known;
+    @synchronized (guard) { known = [placeholders copy]; }
+    for (NSData *placeholder in known) if (wq_icon_fingerprints_match(fp, placeholder)) return nil;
+    if (known.count && !wq_icon_fingerprint_looks_blank(fp)) return raw;
+    NSData *current = wq_icon_fingerprint(wq_raw_icon(@"cz.kolbi.wqfiles.no-such-app"));
+    if (!current) return raw;
+    @synchronized (guard) {
+        BOOL seen = NO;
+        for (NSData *placeholder in placeholders) if (wq_icon_fingerprints_match(current, placeholder)) { seen = YES; break; }
+        if (!seen && placeholders.count < 8) [placeholders addObject:current];
+    }
+    return wq_icon_fingerprints_match(fp, current) ? nil : raw;
 }
 
 // The icon from the app's own bundle, for when iOS only hands out its
@@ -179,7 +230,9 @@ static UIImage *wq_round_icon(UIImage *raw)
 }
 
 // Symbol tile for system services and extensions that have no icon at all,
-// picked from keywords in the bundle id.
+// picked from keywords in Apple bundle ids. Other apps' icons can't be read
+// (worse_query doesn't reach them), and keywords misfire on their ids
+// (com.facebook.Facebook -> "book"), so they all get the neutral gear.
 static UIImage *wq_service_tile(NSString *bundleID)
 {
     static NSArray<NSArray *> *rules;
@@ -240,7 +293,8 @@ static UIImage *wq_service_tile(NSString *bundleID)
     NSString *key = bundleID.lowercaseString;
     NSString *symbol = @"gearshape.fill";
     UIColor *color = UIColor.systemGrayColor;
-    for (NSArray *rule in rules) {
+    BOOL apple = [key hasPrefix:@"com.apple."] || [key hasPrefix:@"group.com.apple."] || [key hasPrefix:@"systemgroup.com.apple."];
+    for (NSArray *rule in apple ? rules : @[]) {
         BOOL hit = NO;
         for (NSString *word in rule[0]) if ([key containsString:word]) { hit = YES; break; }
         if (hit) { symbol = rule[1]; color = rule[2]; break; }
@@ -263,6 +317,250 @@ static UIImage *wq_service_tile(NSString *bundleID)
     return tile;
 }
 
+#pragma mark - App Store icons
+
+// Settings → App Store Icons (off by default; see WQStoreIconsSupport.h).
+// Icons are fetched in batches off the main thread, kept as 120 px PNGs in
+// Application Support/StoreIcons, and announced with
+// WQStoreIconsChangedNotification (userInfo "ids": the bundle ids that got an
+// icon, none when everything changed). Apps without an entry are asked again
+// after a week at the earliest.
+NSString *const WQStoreIconsChangedNotification = @"WQStoreIconsChangedNotification";
+
+static dispatch_queue_t wq_store_state(void)
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue = dispatch_queue_create("wqfiles.storeicons.state", DISPATCH_QUEUE_SERIAL); });
+    return queue;
+}
+
+static dispatch_queue_t wq_store_fetch_queue(void)
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue = dispatch_queue_create("wqfiles.storeicons.fetch", DISPATCH_QUEUE_SERIAL); });
+    return queue;
+}
+
+static NSCache<NSString *, UIImage *> *wq_store_images(void)
+{
+    static NSCache *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 400; });
+    return cache;
+}
+
+static NSString *wq_store_dir(void)
+{
+    NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+    return [support stringByAppendingPathComponent:@"StoreIcons"];
+}
+
+static NSString *wq_store_file(NSString *bundleID)
+{
+    return [wq_store_dir() stringByAppendingPathComponent:[bundleID stringByAppendingPathExtension:@"png"]];
+}
+
+static NSString *wq_store_misses_file(void) { return [wq_store_dir() stringByAppendingPathComponent:@"misses.plist"]; }
+
+// State, only touched on wq_store_state().
+static NSMutableOrderedSet<NSString *> *gStorePending;
+static NSMutableSet<NSString *> *gStoreBusy;
+static NSMutableDictionary<NSString *, NSDate *> *gStoreMisses;
+static BOOL gStoreFlushScheduled, gStorePreloaded;
+
+BOOL wq_store_icons_enabled(void)
+{
+    return [NSUserDefaults.standardUserDefaults boolForKey:WQStoreIconsPref];
+}
+
+static void wq_store_announce(NSArray<NSString *> *_Nullable ids)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSNotificationCenter.defaultCenter postNotificationName:WQStoreIconsChangedNotification object:nil
+                                                        userInfo:ids ? @{ @"ids": ids } : nil];
+    });
+}
+
+void wq_set_store_icons_enabled(BOOL enabled)
+{
+    [NSUserDefaults.standardUserDefaults setBool:enabled forKey:WQStoreIconsPref];
+    dispatch_async(wq_store_state(), ^{
+        [gStorePending removeAllObjects];
+        gStorePreloaded = NO;
+        gStoreMisses = nil;
+        if (!enabled) {
+            [wq_store_images() removeAllObjects];
+            [NSFileManager.defaultManager removeItemAtPath:wq_store_dir() error:NULL];
+        }
+        wq_store_announce(nil);
+    });
+}
+
+static UIImage *_Nullable wq_store_load_file(NSString *bundleID)
+{
+    NSData *data = [NSData dataWithContentsOfFile:wq_store_file(bundleID)];
+    if (data.length == 0 || data.length > WQStoreIconsMaxIconBytes) return nil;
+    UIImage *image = [UIImage imageWithData:data scale:1];
+    return image.CGImage ? image : nil;
+}
+
+// Once per launch: every icon on disk into memory, so lists drawn on the main
+// thread (which never reads files) show them too.
+static void wq_store_preload(void)
+{
+    if (gStorePreloaded) return;
+    gStorePreloaded = YES;
+    dispatch_async(wq_store_fetch_queue(), ^{
+        NSMutableArray<NSString *> *loaded = [NSMutableArray new];
+        for (NSString *name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:wq_store_dir() error:NULL]) {
+            if (![name.pathExtension isEqualToString:@"png"]) continue;
+            NSString *bid = name.stringByDeletingPathExtension;
+            if (!WQStoreIconsEligible(bid) || [wq_store_images() objectForKey:bid]) continue;
+            UIImage *image = wq_store_load_file(bid);
+            if (image) { [wq_store_images() setObject:image forKey:bid]; [loaded addObject:bid]; }
+        }
+        if (loaded.count) wq_store_announce(loaded);
+    });
+}
+
+static NSData *_Nullable wq_store_get(NSURL *url, NSUInteger limit)
+{
+    static NSURLSession *session;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+        config.timeoutIntervalForRequest = 20;
+        config.HTTPCookieStorage = nil;
+        config.HTTPShouldSetCookies = NO;
+        config.URLCache = nil;
+        session = [NSURLSession sessionWithConfiguration:config];
+    });
+    __block NSData *result = nil;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [[session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)response).statusCode : 0;
+        if (!error && status == 200 && data.length <= limit) result = data;
+        dispatch_semaphore_signal(done);
+    }] resume];
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    return result;
+}
+
+// One lookup round: ids -> icons saved; returns the ids without an entry.
+static NSArray<NSString *> *wq_store_fetch_batch(NSArray<NSString *> *ids, NSString *country, NSMutableArray<NSString *> *saved)
+{
+    NSURL *lookup = WQStoreIconsLookupURL(ids, country);
+    NSData *json = lookup ? wq_store_get(lookup, WQStoreIconsMaxResponseBytes) : nil;
+    if (!json) return nil;   // network or server trouble: nothing is marked missing
+    NSDictionary<NSString *, NSURL *> *art = WQStoreIconsArtwork(json, ids);
+    NSMutableArray<NSString *> *missing = [NSMutableArray new];
+    for (NSString *bid in ids) {
+        NSURL *url = art[bid];
+        if (!url) { [missing addObject:bid]; continue; }
+        NSData *png = wq_store_get(url, WQStoreIconsMaxIconBytes);
+        UIImage *image = png ? [UIImage imageWithData:png scale:1] : nil;
+        if (!image.CGImage) continue;   // try again next launch
+        NSData *stored = UIImagePNGRepresentation(image);
+        if (stored.length && stored.length <= WQStoreIconsMaxIconBytes && [stored writeToFile:wq_store_file(bid) atomically:YES]) {
+            [wq_store_images() setObject:image forKey:bid];
+            [saved addObject:bid];
+        }
+    }
+    return missing;
+}
+
+static void wq_store_flush(void)
+{
+    gStoreFlushScheduled = NO;
+    if (!wq_store_icons_enabled() || !gStorePending.count) return;
+    NSArray<NSString *> *all = [gStorePending.array copy];   // .array is a live view of the set
+    [gStorePending removeAllObjects];
+    [gStoreBusy addObjectsFromArray:all];
+    NSString *country = WQStoreIconsCountry([NSLocale.currentLocale objectForKey:NSLocaleCountryCode]);
+    dispatch_async(wq_store_fetch_queue(), ^{
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSURL *dir = [NSURL fileURLWithPath:wq_store_dir() isDirectory:YES];
+        [fm createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+        [dir setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:NULL];
+        NSMutableArray<NSString *> *missed = [NSMutableArray new];
+        NSUInteger asked = 0, found = 0;
+        for (NSUInteger i = 0; i < all.count && wq_store_icons_enabled(); i += WQStoreIconsBatch) {
+            NSArray<NSString *> *batch = [all subarrayWithRange:NSMakeRange(i, MIN((NSUInteger)WQStoreIconsBatch, all.count - i))];
+            NSMutableArray<NSString *> *saved = [NSMutableArray new];
+            NSArray<NSString *> *missing = wq_store_fetch_batch(batch, country, saved);
+            // Not in this region's store: the US store has most apps.
+            if (missing.count && ![country isEqualToString:@"us"]) missing = wq_store_fetch_batch(missing, @"us", saved);
+            asked += batch.count;
+            found += saved.count;
+            if (missing) [missed addObjectsFromArray:missing];
+            if (saved.count) wq_store_announce(saved);
+        }
+        wq_log(@"store icons: %lu asked (%@), %lu found, %lu not in the App Store",
+               (unsigned long)asked, country, (unsigned long)found, (unsigned long)missed.count);
+        dispatch_async(wq_store_state(), ^{
+            [gStoreBusy minusSet:[NSSet setWithArray:all]];
+            if (!missed.count) return;
+            NSDate *now = NSDate.date;
+            for (NSString *bid in missed) gStoreMisses[bid] = now;
+            NSMutableDictionary *plist = [NSMutableDictionary new];
+            [gStoreMisses enumerateKeysAndObjectsUsingBlock:^(NSString *bid, NSDate *when, BOOL *__unused stop) {
+                if (-when.timeIntervalSinceNow < WQStoreIconsMissRetry) plist[bid] = when;
+            }];
+            [plist writeToFile:wq_store_misses_file() atomically:YES];
+        });
+    });
+}
+
+static void wq_store_request(NSString *bundleID)
+{
+    dispatch_async(wq_store_state(), ^{
+        if (!gStorePending) {
+            gStorePending = [NSMutableOrderedSet new];
+            gStoreBusy = [NSMutableSet new];
+        }
+        if (!gStoreMisses) {
+            NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:wq_store_misses_file()];
+            gStoreMisses = [NSMutableDictionary new];
+            [plist enumerateKeysAndObjectsUsingBlock:^(id bid, id when, BOOL *__unused stop) {
+                if ([bid isKindOfClass:NSString.class] && [when isKindOfClass:NSDate.class]) gStoreMisses[bid] = when;
+            }];
+        }
+        NSDate *missed = gStoreMisses[bundleID];
+        if (missed && -missed.timeIntervalSinceNow < WQStoreIconsMissRetry) return;
+        if ([gStoreBusy containsObject:bundleID] || [wq_store_images() objectForKey:bundleID]) return;
+        if ([NSFileManager.defaultManager fileExistsAtPath:wq_store_file(bundleID)]) return;
+        [gStorePending addObject:bundleID];
+        if (gStoreFlushScheduled) return;
+        gStoreFlushScheduled = YES;
+        // Collect a whole list pass into few requests.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), wq_store_state(), ^{ wq_store_flush(); });
+    });
+}
+
+// The App Store icon for bundleID when the setting is on: from memory, or (off
+// the main thread) from disk; a miss off the main thread asks the App Store.
+static UIImage *_Nullable wq_store_icon(NSString *bundleID, BOOL background)
+{
+    if (!wq_store_icons_enabled() || !WQStoreIconsEligible(bundleID)) return nil;
+    UIImage *image = [wq_store_images() objectForKey:bundleID];
+    if (image) return image;
+    dispatch_async(wq_store_state(), ^{ wq_store_preload(); });
+    if (!background) return nil;
+    image = wq_store_load_file(bundleID);
+    if (image) { [wq_store_images() setObject:image forKey:bundleID]; return image; }
+    wq_store_request(bundleID);
+    return nil;
+}
+
+void wq_reload_visible_rows(UITableView *tableView)
+{
+    if (!tableView.window || tableView.isEditing) return;
+    NSArray<NSIndexPath *> *rows = tableView.indexPathsForVisibleRows;
+    if (rows.count) [tableView reloadRowsAtIndexPaths:rows withRowAnimation:UITableViewRowAnimationNone];
+}
+
 // Rounded app icon for a bundle id, cached. Falls back to the closest parent
 // app's icon (extensions: com.foo.app.widget -> com.foo.app), then to a
 // neutral service tile. Nil only without a bundle id.
@@ -271,22 +569,42 @@ UIImage *wq_app_icon(NSString *bundleID)
     if (!bundleID.length) return nil;
     static NSCache *cache;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        // App Store icons arrived (or the setting changed): drop the tiles.
+        [NSNotificationCenter.defaultCenter addObserverForName:WQStoreIconsChangedNotification object:nil queue:nil
+                                                    usingBlock:^(NSNotification *note) {
+            NSArray *ids = note.userInfo[@"ids"];
+            if (![ids isKindOfClass:NSArray.class]) { [cache removeAllObjects]; return; }
+            for (NSString *bid in ids) [cache removeObjectForKey:bid];
+        }];
+    });
     UIImage *cached = [cache objectForKey:bundleID];
     if (cached) return cached;
     // The bundle fallback reads files and may ask for access: never on the
     // main thread. Lists warm the cache from their background passes; a
     // main-thread miss gets the tile without caching it.
     BOOL background = !NSThread.isMainThread;
-    UIImage *system = wq_real_icon(bundleID);
+    // App Group ids ("group.net.whatsapp.WhatsApp.shared") aren't bundles:
+    // look up the app id inside them (net.whatsapp.WhatsApp.shared, then its
+    // parents) instead of the group id and its "group.net…" parents.
+    NSString *appID = bundleID;
+    for (NSString *prefix in @[@"group.", @"systemgroup."]) {
+        if ([bundleID hasPrefix:prefix] && bundleID.length > prefix.length) {
+            appID = [bundleID substringFromIndex:prefix.length];
+            break;
+        }
+    }
+    UIImage *system = wq_real_icon(appID);
     if (system && background) wq_icon_note(bundleID, @"iOS returned an icon");
-    UIImage *raw = system ?: (background ? wq_bundle_icon(bundleID) : nil);
-    NSArray *parts = [bundleID componentsSeparatedByString:@"."];
+    UIImage *raw = system ?: (background ? wq_bundle_icon(appID) : nil);
+    NSArray *parts = [appID componentsSeparatedByString:@"."];
     for (NSInteger n = (NSInteger)parts.count - 1; !raw && n >= 3; n--)
     {
         NSString *parent = [[parts subarrayWithRange:NSMakeRange(0, (NSUInteger)n)] componentsJoinedByString:@"."];
         raw = wq_real_icon(parent) ?: (background ? wq_bundle_icon(parent) : nil);
     }
+    if (!raw && [appID isEqualToString:bundleID]) raw = wq_store_icon(bundleID, background);
     UIImage *icon = raw ? wq_round_icon(raw) : wq_service_tile(bundleID);
     if (raw || background) [cache setObject:icon forKey:bundleID];
     return icon;
@@ -298,6 +616,49 @@ dispatch_queue_t wq_io(void)
     static dispatch_once_t once;
     dispatch_once(&once, ^{ queue = dispatch_queue_create("wqfiles.io", DISPATCH_QUEUE_SERIAL); });
     return queue;
+}
+
+dispatch_queue_t wq_scan_queue(void)
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // User-initiated: someone is waiting for the list. Utility (0.9.11)
+        // put scans on the efficiency cores with throttled disk I/O.
+        queue = dispatch_queue_create("wqfiles.scans", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+    });
+    return queue;
+}
+
+static BOOL (*gScanKeepsRunning)(void);
+
+void wq_scan_pause_for_background(void)
+{
+    wq_scan_set_paused(YES);
+    [WQScanTask setPaused:YES];
+}
+
+void wq_scan_lifecycle_install(BOOL (*keepRunning)(void))
+{
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        gScanKeepsRunning = keepRunning;
+        // Scans pause in the background, except while a full scan still has
+        // its background time; that time's expiry pauses them instead.
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *__unused note) {
+            if (gScanKeepsRunning && gScanKeepsRunning()) return;
+            wq_scan_pause_for_background();
+        }];
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillEnterForegroundNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *__unused note) {
+            wq_scan_set_paused(NO);
+            [WQScanTask setPaused:NO];
+        }];
+    });
+}
+
+void wq_scan_read(void (^work)(void))
+{
+    dispatch_sync(wq_io(), work);
 }
 
 static NSString *const kWQDeletingDisabledPref = @"WQDeletingDisabled";
@@ -365,6 +726,111 @@ NSString *wq_size_text(unsigned long long size)
     return [NSByteCountFormatter stringFromByteCount:(long long)size countStyle:NSByteCountFormatterCountStyleFile];
 }
 
+static NSString *const kWQPrismBackgroundChanged = @"WQPrismBackgroundChanged";
+static NSString *const kWQPlainBackgroundPref = @"WQPlainBackground";
+
+BOOL wq_prism_plain_background(void)
+{
+    return [NSUserDefaults.standardUserDefaults boolForKey:kWQPlainBackgroundPref];
+}
+
+void wq_set_prism_plain_background(BOOL plain)
+{
+    [NSUserDefaults.standardUserDefaults setBool:plain forKey:kWQPlainBackgroundPref];
+    [NSNotificationCenter.defaultCenter postNotificationName:kWQPrismBackgroundChanged object:nil];
+}
+
+static NSString *const kWQBackgroundColorPref = @"WQBackgroundColor";   // @[r, g, b] in sRGB
+
+UIColor *wq_prism_background_color(void)
+{
+    NSArray *rgb = [NSUserDefaults.standardUserDefaults arrayForKey:kWQBackgroundColorPref];
+    if (rgb.count != 3) return nil;
+    for (id v in rgb) if (![v isKindOfClass:NSNumber.class]) return nil;
+    return [UIColor colorWithRed:[rgb[0] doubleValue] green:[rgb[1] doubleValue] blue:[rgb[2] doubleValue] alpha:1];
+}
+
+void wq_set_prism_background_color(UIColor *color)
+{
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (color && [color getRed:&r green:&g blue:&b alpha:&a])
+        [NSUserDefaults.standardUserDefaults setObject:@[@(MIN(1, MAX(0, r))), @(MIN(1, MAX(0, g))), @(MIN(1, MAX(0, b)))]
+                                                forKey:kWQBackgroundColorPref];
+    else
+        [NSUserDefaults.standardUserDefaults removeObjectForKey:kWQBackgroundColorPref];
+    [NSNotificationCenter.defaultCenter postNotificationName:kWQPrismBackgroundChanged object:nil];
+}
+
+// The picked color's hue and saturation with a brightness that keeps text
+// readable: deep in dark mode, pale in light mode.
+static UIColor *wq_tinted(UIColor *color, BOOL dark, CGFloat level, CGFloat alpha)
+{
+    CGFloat h = 0, s = 0, v = 0, a = 0;
+    [color getHue:&h saturation:&s brightness:&v alpha:&a];
+    return dark ? [UIColor colorWithHue:h saturation:s * 0.75 brightness:MIN(v, 1.0) * level alpha:alpha]
+                : [UIColor colorWithHue:h saturation:s * level brightness:1.0 alpha:alpha];
+}
+
+@implementation WQPrismPalette
+@end
+
+WQPrismPalette *wq_prism_palette(BOOL dark)
+{
+    WQPrismPalette *p = [WQPrismPalette new];
+    BOOL plain = wq_prism_plain_background();
+    // An imported theme (Settings → Theme) brings its own colors.
+    WQTheme *theme = wq_active_theme();
+    if (theme) {
+        WQThemeAppearance *a = [theme appearanceDark:dark];
+        if (plain) {
+            p.baseTop = p.baseBottom = a.plain ?: a.baseTop;
+            p.glows = @[];
+        } else {
+            p.baseTop = a.baseTop;
+            p.baseBottom = a.baseBottom;
+            p.glows = a.glows;
+        }
+        return p;
+    }
+    UIColor *custom = [wq_active_theme_id() isEqualToString:WQThemeCustomColor] ? wq_prism_background_color() : nil;
+    if (plain) {
+        // Plain black (dark) or white (light) like the classic design, or the
+        // picked color kept dark or pale enough for text.
+        UIColor *color = custom ? wq_tinted(custom, dark, dark ? 0.32 : 0.14, 1)
+                                : (dark ? UIColor.blackColor : UIColor.whiteColor);
+        p.baseTop = p.baseBottom = color;
+        p.glows = @[];
+        return p;
+    }
+    if (custom) {
+        // Glows in the picked hue and two neighbours, on a base tinted the same way.
+        CGFloat h = 0, s = 0, v = 0, a = 0;
+        [custom getHue:&h saturation:&s brightness:&v alpha:&a];
+        CGFloat hues[4] = {h, fmod(h + 0.06, 1), fmod(h + 0.94, 1), fmod(h + 0.12, 1)};
+        CGFloat alphas[4] = {dark ? 0.62 : 0.48, dark ? 0.48 : 0.38, dark ? 0.32 : 0.30, 0.24};
+        p.baseTop = wq_tinted(custom, dark, dark ? 0.08 : 0.06, 1);
+        p.baseBottom = wq_tinted(custom, dark, dark ? 0.16 : 0.12, 1);
+        NSMutableArray<UIColor *> *glows = [NSMutableArray new];
+        for (NSUInteger i = 0; i < 4; i++)
+            [glows addObject:dark ? [UIColor colorWithHue:hues[i] saturation:MAX(s, 0.15) * 0.85 brightness:MAX(v, 0.35) * 0.95 alpha:alphas[i]]
+                                  : [UIColor colorWithHue:hues[i] saturation:MAX(s, 0.15) * 0.45 brightness:1.0 alpha:alphas[i]]];
+        p.glows = glows;
+        return p;
+    }
+    if (dark) {
+        p.baseTop = [UIColor colorWithRed:0.024 green:0.033 blue:0.062 alpha:1];
+        p.baseBottom = [UIColor colorWithRed:0.043 green:0.063 blue:0.125 alpha:1];
+        p.glows = @[[UIColor colorWithRed:0.30 green:0.42 blue:0.95 alpha:0.62], [UIColor colorWithRed:0.55 green:0.36 blue:0.95 alpha:0.48],
+                    [UIColor colorWithRed:0.12 green:0.76 blue:0.66 alpha:0.32], [UIColor colorWithRed:0.95 green:0.34 blue:0.60 alpha:0.22]];
+    } else {
+        p.baseTop = [UIColor colorWithRed:0.92 green:0.95 blue:1.0 alpha:1];
+        p.baseBottom = [UIColor colorWithRed:0.86 green:0.91 blue:1.0 alpha:1];
+        p.glows = @[[UIColor colorWithRed:0.56 green:0.69 blue:1.0 alpha:0.48], [UIColor colorWithRed:0.78 green:0.65 blue:1.0 alpha:0.38],
+                    [UIColor colorWithRed:0.52 green:0.92 blue:0.84 alpha:0.30], [UIColor colorWithRed:1.0 green:0.72 blue:0.84 alpha:0.24]];
+    }
+    return p;
+}
+
 // WQ Prism: a soft layered backdrop shared by the redesigned screens.
 @interface WQPrismBackgroundView : UIView
 @end
@@ -395,28 +861,20 @@ NSString *wq_size_text(unsigned long long size)
         _glows = glows;
         [self updateColors];
         [self registerForTraitChanges:@[UITraitUserInterfaceStyle.class] withAction:@selector(updateColors)];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(updateColors)
+                                                   name:kWQPrismBackgroundChanged object:nil];
     }
     return self;
 }
 
 - (void)updateColors
 {
-    BOOL dark = self.traitCollection.userInterfaceStyle != UIUserInterfaceStyleLight;
-    if (dark) {
-        _base.colors = @[(id)[UIColor colorWithRed:0.024 green:0.033 blue:0.062 alpha:1].CGColor,
-                         (id)[UIColor colorWithRed:0.043 green:0.063 blue:0.125 alpha:1].CGColor];
-        _glows[0].colors = @[(id)[UIColor colorWithRed:0.30 green:0.42 blue:0.95 alpha:0.62].CGColor, (id)[UIColor clearColor].CGColor];
-        _glows[1].colors = @[(id)[UIColor colorWithRed:0.55 green:0.36 blue:0.95 alpha:0.48].CGColor, (id)[UIColor clearColor].CGColor];
-        _glows[2].colors = @[(id)[UIColor colorWithRed:0.12 green:0.76 blue:0.66 alpha:0.32].CGColor, (id)[UIColor clearColor].CGColor];
-        _glows[3].colors = @[(id)[UIColor colorWithRed:0.95 green:0.34 blue:0.60 alpha:0.22].CGColor, (id)[UIColor clearColor].CGColor];
-    } else {
-        _base.colors = @[(id)[UIColor colorWithRed:0.92 green:0.95 blue:1.0 alpha:1].CGColor,
-                         (id)[UIColor colorWithRed:0.86 green:0.91 blue:1.0 alpha:1].CGColor];
-        _glows[0].colors = @[(id)[UIColor colorWithRed:0.56 green:0.69 blue:1.0 alpha:0.48].CGColor, (id)[UIColor clearColor].CGColor];
-        _glows[1].colors = @[(id)[UIColor colorWithRed:0.78 green:0.65 blue:1.0 alpha:0.38].CGColor, (id)[UIColor clearColor].CGColor];
-        _glows[2].colors = @[(id)[UIColor colorWithRed:0.52 green:0.92 blue:0.84 alpha:0.30].CGColor, (id)[UIColor clearColor].CGColor];
-        _glows[3].colors = @[(id)[UIColor colorWithRed:1.0 green:0.72 blue:0.84 alpha:0.24].CGColor, (id)[UIColor clearColor].CGColor];
+    WQPrismPalette *p = wq_prism_palette(self.traitCollection.userInterfaceStyle != UIUserInterfaceStyleLight);
+    for (NSUInteger i = 0; i < _glows.count; i++) {
+        _glows[i].hidden = p.glows.count <= i;
+        if (p.glows.count > i) _glows[i].colors = @[(id)p.glows[i].CGColor, (id)UIColor.clearColor.CGColor];
     }
+    _base.colors = @[(id)p.baseTop.CGColor, (id)p.baseBottom.CGColor];
 }
 
 - (void)layoutSubviews
@@ -472,3 +930,105 @@ void wq_set_prism_enabled(BOOL enabled)
 {
     [NSUserDefaults.standardUserDefaults setBool:!enabled forKey:kWQClassicDesignPref];
 }
+
+// iPad: busy tab items with their plain titles; one timer animates them all
+// and stops when none is busy.
+static NSMapTable<UITabBarItem *, NSString *> *gBusyTabs;   // running → spinner
+static NSHashTable<UITabBarItem *> *gWaitingTabs;              // queued → clock
+static NSTimer *gBusyTabTimer;
+
+static void wq_busy_tabs_tick(void)
+{
+    static NSArray<NSString *> *frames;
+    static NSUInteger frame;
+    if (!frames) frames = @[@"⠋", @"⠙", @"⠹", @"⠸", @"⠼", @"⠴", @"⠦", @"⠧", @"⠇", @"⠏"];
+    frame = (frame + 1) % frames.count;
+    for (UITabBarItem *item in gBusyTabs)
+        if (![gWaitingTabs containsObject:item]) item.title = [NSString stringWithFormat:@"%@ %@", [gBusyTabs objectForKey:item], frames[frame]];
+}
+
+BOOL wq_scan_task_waiting(WQScanTask *task)
+{
+    // A started task publishes progress once its worker runs; until then it waits
+    // behind another scan on the shared queue (or is paused).
+    return task.running && (task.paused || !task.status.length
+        || [task.status isEqualToString:@"Scan queued; previous results kept"]
+        || [task.status isEqualToString:WQLocalized(@"Scan queued; previous results kept")]);
+}
+
+void wq_set_tab_busy(UIViewController *tabRoot, NSString *title, WQTabBusy state)
+{
+    UITabBarItem *item = tabRoot.tabBarItem;
+    if (UIDevice.currentDevice.userInterfaceIdiom != UIUserInterfaceIdiomPad) {
+        item.badgeColor = UIColor.systemGrayColor;  // busy, not a warning
+        item.badgeValue = state == WQTabBusyRunning ? @"…" : state == WQTabBusyWaiting ? @"◷" : nil;
+        return;
+    }
+    item.badgeValue = nil;
+    if (!gBusyTabs) {
+        gBusyTabs = [NSMapTable weakToStrongObjectsMapTable];
+        gWaitingTabs = [NSHashTable weakObjectsHashTable];
+    }
+    if (state == WQTabBusyWaiting) {
+        [gBusyTabs removeObjectForKey:item];
+        [gWaitingTabs addObject:item];
+        item.title = [title stringByAppendingString:@" ◷"];
+    } else if (state == WQTabBusyRunning) {
+        BOOL known = [gBusyTabs objectForKey:item] != nil;
+        [gWaitingTabs removeObject:item];
+        [gBusyTabs setObject:title forKey:item];
+        if (!known) wq_busy_tabs_tick();
+    } else {
+        [gWaitingTabs removeObject:item];
+        [gBusyTabs removeObjectForKey:item];
+        item.title = title;
+    }
+    if (gBusyTabs.count && !gBusyTabTimer) {
+        gBusyTabTimer = [NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer * __unused t) { wq_busy_tabs_tick(); }];
+        [NSRunLoop.mainRunLoop addTimer:gBusyTabTimer forMode:NSRunLoopCommonModes];
+    } else if (!gBusyTabs.count && gBusyTabTimer) {
+        [gBusyTabTimer invalidate];
+        gBusyTabTimer = nil;
+    }
+}
+
+@implementation WQProgressHeaderView {
+    UILabel *_label;
+    UIProgressView *_bar;
+}
+
+- (instancetype)initWithReuseIdentifier:(NSString *)reuseIdentifier
+{
+    if ((self = [super initWithReuseIdentifier:reuseIdentifier])) {
+        _label = [UILabel new];
+        _label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+        _label.adjustsFontForContentSizeCategory = YES;
+        _label.textColor = UIColor.secondaryLabelColor;
+        _label.numberOfLines = 0;
+        _bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+        UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[_label, _bar]];
+        stack.axis = UILayoutConstraintAxisVertical;
+        stack.spacing = 8;
+        stack.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.contentView addSubview:stack];
+        UILayoutGuide *m = self.contentView.layoutMarginsGuide;
+        NSLayoutConstraint *bottom = [stack.bottomAnchor constraintEqualToAnchor:m.bottomAnchor];
+        bottom.priority = UILayoutPriorityDefaultHigh;
+        [NSLayoutConstraint activateConstraints:@[
+            [stack.leadingAnchor constraintEqualToAnchor:m.leadingAnchor],
+            [stack.trailingAnchor constraintEqualToAnchor:m.trailingAnchor],
+            [stack.topAnchor constraintEqualToAnchor:m.topAnchor],
+            bottom,
+        ]];
+    }
+    return self;
+}
+
+- (void)setText:(NSString *)text fraction:(float)fraction
+{
+    _label.text = text;
+    _bar.hidden = fraction < 0;
+    if (fraction >= 0) [_bar setProgress:MIN(1.0f, fraction) animated:NO];
+}
+
+@end

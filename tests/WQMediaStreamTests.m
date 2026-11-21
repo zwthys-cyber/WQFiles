@@ -98,6 +98,12 @@ static NSString *Fixture(NSString *dir, NSString *name, NSArray<NSString *> *com
     if (status == FixtureOK && [NSFileManager.defaultManager fileExistsAtPath:path]) return path;
     NSString *what = status == FixtureTimedOut ? @"TIMEOUT" : status == FixtureUnavailable ? @"unavailable" : @"failed";
     NSString *line = [NSString stringWithFormat:@"%@ %@: %@", phase, what, detail ?: @"no output file"];
+    // Only a missing tool is a skip. A helper that ran and failed or timed
+    // out is a failure, unless WQ_MEDIA_ALLOW_SKIPS=1 (review DR-51).
+    if (status != FixtureUnavailable && !getenv("WQ_MEDIA_ALLOW_SKIPS")) {
+        fprintf(stderr, "FAIL: %s\n", line.UTF8String);
+        exit(1);
+    }
     [skips addObject:line];
     printf("SKIP: %s\n", line.UTF8String);
     if (status == FixtureTimedOut) fprintf(stderr, "SKIP: %s\n", line.UTF8String);

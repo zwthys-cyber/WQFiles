@@ -19,6 +19,32 @@ jobs:
           python3 --version
       - name: Run regression tests and build IPA
         run: bash build.sh
+      - name: Boot disposable iOS simulator
+        timeout-minutes: 5
+        run: |
+          xcrun simctl list devices available -j > .work/simulator-devices.json
+          python3 - <<'PYSELECT'
+          import json, os, re, subprocess
+          devices = json.load(open('.work/simulator-devices.json'))['devices']
+          candidates = []
+          for runtime, group in devices.items():
+              match = re.search(r'\.iOS-(\d+)', runtime)
+              if not match or int(match.group(1)) < 26:
+                  continue
+              for device in group:
+                  if device.get('isAvailable') and device['name'].startswith('iPhone'):
+                      candidates.append((runtime, device['udid']))
+          if not candidates:
+              raise SystemExit('No available iPhone simulator with iOS 26 or later')
+          _, identifier = sorted(candidates)[-1]
+          subprocess.run(['xcrun', 'simctl', 'boot', identifier], check=False)
+          subprocess.run(['xcrun', 'simctl', 'bootstatus', identifier, '-b'], check=True, timeout=180)
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write('WQ_SIMULATOR_UDID=' + identifier + '\n')
+          PYSELECT
+      - name: Run UIKit scan lifecycle regression
+        timeout-minutes: 10
+        run: bash tests/run_scan_ui_tests.sh
       - name: Create checksum
         run: shasum -a 256 WQFiles.ipa > WQFiles.ipa.sha256
       - name: Upload IPA for re-signing

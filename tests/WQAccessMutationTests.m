@@ -97,6 +97,14 @@ int main(void)
             check(wq_backup_unit_deletable(fileBackupStamp), @"file backup stamp is a deletable unit");
             check(!wq_backup_unit_deletable(wq_test_backup_root), @"file backup root is not a unit");
             check(!wq_backup_unit_deletable([fileBackupStamp stringByAppendingPathComponent:@"sentinel"]), @"file backup contents are not units");
+            NSString *fakeUnit = [wq_test_backup_root stringByAppendingPathComponent:@"2026-11-09 22.11.00"];
+            put(fakeUnit, @"not a folder");
+            check(!wq_backup_unit_deletable(fakeUnit) && !wq_delete_backup(fakeUnit, &error) && [fm fileExistsAtPath:fakeUnit],
+                  @"a regular file with a unit name is not a unit (DR-07)");
+            NSString *linkUnit = [wq_test_backup_root stringByAppendingPathComponent:@"2026-11-09 22.12.00"];
+            check(symlink(fileBackupStamp.fileSystemRepresentation, linkUnit.fileSystemRepresentation) == 0, @"create link unit fixture");
+            check(!wq_backup_unit_deletable(linkUnit), @"a link with a unit name is not a unit (DR-07)");
+            unlink(linkUnit.fileSystemRepresentation); unlink(fakeUnit.fileSystemRepresentation);
             check(wq_delete_backup(fileBackupStamp, &error) && ![fm fileExistsAtPath:fileBackupStamp], @"explicit file backup deletion succeeds");
             NSString *backupBundle = [wq_test_app_backup_root stringByAppendingPathComponent:@"com.example.app"];
             NSString *backupDate = [backupBundle stringByAppendingPathComponent:@"2026-11-09 22.00.00"];

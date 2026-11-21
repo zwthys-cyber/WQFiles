@@ -47,6 +47,11 @@ static ssize_t failingWrite(int fd, const void *buffer, size_t length)
 int main(void)
 {
     @autoreleasepool {
+        // DR-29: REAL values shown as text read back to the same double.
+        double reals[] = {0.1, 1.0/3.0, 0.1 + 0.2, 1e-300, 123456789.123456789, -2.5};
+        for (size_t i = 0; i < sizeof reals / sizeof reals[0]; i++)
+            check(strtod(wq_sqlite_real_text(reals[i]).UTF8String, NULL) == reals[i], @"REAL text round-trips");
+        check([wq_sqlite_real_text(0.1) isEqualToString:@"0.1"], @"short REAL text stays short");
         NSFileManager *fm = NSFileManager.defaultManager;
         NSString *base = [NSTemporaryDirectory() stringByAppendingPathComponent:
                           [@"WQSQLiteSupportTests-" stringByAppendingString:NSUUID.UUID.UUIDString]];

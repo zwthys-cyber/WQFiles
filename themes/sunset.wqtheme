@@ -1,0 +1,57 @@
+{
+  "name": "Sunset",
+  "author": "WQ Files",
+  "dark": {
+    "background": [
+      "#140806",
+      "#2A0F12"
+    ],
+    "glows": [
+      "#FF6A3DA0",
+      "#FF2E7A70",
+      "#FFC24A55",
+      "#B34DFF3A"
+    ],
+    "accent": "#FF8A4C",
+    "plain": "#140806"
+  },
+  "light": {
+    "background": [
+      "#FFF4EC",
+      "#FFE3D6"
+    ],
+    "glows": [
+      "#FFAA7A80",
+      "#FF8AB560",
+      "#FFD27A55",
+      "#D9A6FF40"
+    ],
+    "accent": "#E8562A"
+  },
+  "tiles": {
+    "blue": [
+      "#FF9A6B",
+      "#E8562A"
+    ],
+    "sky": [
+      "#FFB38A",
+      "#F06A3A"
+    ],
+    "violet": [
+      "#FF8AB5",
+      "#D9367A"
+    ],
+    "indigo": [
+      "#FF7A8A",
+      "#C93A55"
+    ],
+    "mint": [
+      "#FFC86B",
+      "#E0901F"
+    ],
+    "gray": [
+      "#D9B3A6",
+      "#9C6B5C"
+    ]
+  }
+}

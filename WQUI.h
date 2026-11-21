@@ -40,11 +40,60 @@ UIView *wq_device_header(CGFloat width);
 // "iPhone 17 Pro Max (iPhone18,2) · iOS 27.0.1 (24A446)"
 NSString *wq_device_line(void);
 UIImage *_Nullable wq_app_icon(NSString *_Nullable bundleID);
+// Settings → App Store Icons (off by default): other apps' icons can't be read
+// with worse_query, so wq_app_icon can fetch them from Apple's App Store
+// lookup (sends the bundle ids and the region). Lists showing app icons
+// reload on WQStoreIconsChangedNotification (userInfo "ids": bundle ids that
+// got an icon; missing when everything changed).
+extern NSString *const WQStoreIconsChangedNotification;
+BOOL wq_store_icons_enabled(void);
+void wq_set_store_icons_enabled(BOOL enabled);
+// Redraws the visible rows (not while editing, so a selection survives).
+void wq_reload_visible_rows(UITableView *tableView);
 // WQ Prism: a soft layered backdrop shared by the redesigned screens.
 UIView *wq_prism_background_view(void);
 void wq_prism_install_background(UIViewController *vc);
 // Settings → New Design: WQ Prism (default) or the classic list design.
 BOOL wq_prism_enabled(void);
 void wq_set_prism_enabled(BOOL enabled);
+// Settings → Plain Background (issue #56): the WQ Prism screens on a plain
+// system background instead of the colored glows. Switching it updates every
+// backdrop at once.
+BOOL wq_prism_plain_background(void);
+void wq_set_prism_plain_background(BOOL plain);
+// Settings → Background Color: tints the glows (or, with Plain Background, the
+// whole backdrop) with one picked color; nil restores the default colors.
+UIColor *_Nullable wq_prism_background_color(void);
+void wq_set_prism_background_color(UIColor *_Nullable color);
+// The backdrop's colors for dark or light mode, as the settings ask: a base
+// gradient and up to four glows (none for Plain Background). Shared by the
+// app's backdrop and the Wi-Fi sharing web page.
+@interface WQPrismPalette : NSObject
+@property (nonatomic, strong) UIColor *baseTop, *baseBottom;
+@property (nonatomic, copy) NSArray<UIColor *> *glows;
+@end
+WQPrismPalette *wq_prism_palette(BOOL dark);
+
+
+
+// Read-only scan orchestration runs separately from mutations. Directory-sized
+// measurement steps rejoin wq_io(), so foreground requests can run between them.
+// Registered at launch: scans pause when WQ Files goes to the background,
+// unless keepRunning() says a full scan still has background time.
+void wq_scan_lifecycle_install(BOOL (*_Nullable keepRunning)(void));
+void wq_scan_pause_for_background(void);
+dispatch_queue_t wq_scan_queue(void);
+void wq_scan_read(void (^work)(void));
+// Marks a tab while its scan runs or waits for another scan: a gray "…" or "◷"
+// badge on iPhone; on iPad the floating tab bar always draws badges red, so the
+// title gets an animated braille spinner (⠋⠙⠹…) or a clock (◷) instead.
+typedef NS_ENUM(NSInteger, WQTabBusy) { WQTabBusyNone, WQTabBusyRunning, WQTabBusyWaiting };
+@class WQScanTask;
+BOOL wq_scan_task_waiting(WQScanTask *task);
+// Section header with the status text and, while fraction >= 0, a progress bar.
+@interface WQProgressHeaderView : UITableViewHeaderFooterView
+- (void)setText:(nullable NSString *)text fraction:(float)fraction;
+@end
+void wq_set_tab_busy(UIViewController *tabRoot, NSString *title, WQTabBusy state);
 
 NS_ASSUME_NONNULL_END

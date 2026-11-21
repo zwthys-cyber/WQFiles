@@ -143,6 +143,23 @@ static inline NSString *WQPDateText(NSDate *date)
     return [WQPDateFormatter(t != floor(t)) stringFromDate:date];
 }
 
+// Whether a property list holds a date with a fraction of a second. XML
+// property lists store dates to the second, so saving one there would
+// silently round it (review DR-38).
+static inline BOOL WQPHasFractionalDate(id value)
+{
+    if ([value isKindOfClass:NSDate.class]) {
+        NSTimeInterval t = [(NSDate *)value timeIntervalSinceReferenceDate];
+        return t != floor(t);
+    }
+    if ([value isKindOfClass:NSDictionary.class]) {
+        for (id v in [(NSDictionary *)value objectEnumerator]) if (WQPHasFractionalDate(v)) return YES;
+    } else if ([value isKindOfClass:NSArray.class]) {
+        for (id v in (NSArray *)value) if (WQPHasFractionalDate(v)) return YES;
+    }
+    return NO;
+}
+
 static inline NSDate *_Nullable WQPParseDate(NSString *text)
 {
     NSString *trimmed = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];

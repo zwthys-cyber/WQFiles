@@ -420,4 +420,77 @@ static inline NSComparisonResult WQBackupStampCompare(NSString *a, NSString *b)
     }
     return NSOrderedSame;
 }
+// iOS 27.2 replaced the container's identifier attribute with
+// "com.apple.containermanager.identity", text lines such as
+// "v: 01", "schema: 002", "uuid: …", "identifier: group.com.apple.newsd".
+// Returns the identifier, or nil when the text has none or several.
+static inline NSString *WQIdentityAttributeIdentifier(NSData *value)
+{
+    if (value.length == 0 || value.length > 4096) return nil;
+    NSString *text = [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
+    if (!text) return nil;
+    NSString *found = nil;
+    for (NSString *raw in [text componentsSeparatedByString:@"\n"]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (![line hasPrefix:@"identifier:"]) continue;
+        NSString *ident = [[line substringFromIndex:11] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (!ident.length || [ident rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound) return nil;
+        if (found) return nil;
+        found = ident;
+    }
+    return found;
+}
+// The App Group folder the container manager hands out tokens for. Inside
+// LiveContainer, NSFileManager returns a stand-in under LiveContainer's own
+// group (<real group>/LiveContainer/Data/AppGroup/<id>); the token is for the
+// real group's Library/Caches, so swapping the stand-in never works (#65).
+static inline NSString *WQGroupRootForPath(NSString *path)
+{
+    if (!path.length) return nil;
+    NSRange lc = [path rangeOfString:@"/LiveContainer/Data/AppGroup/"];
+    if (lc.location == NSNotFound) return path;
+    NSString *real = [path substringToIndex:lc.location];
+    // Only a container directly under Shared/AppGroup qualifies.
+    NSString *parent = WQCanonicalVarPath(real.stringByDeletingLastPathComponent);
+    if (![parent isEqualToString:@"/private/var/mobile/Containers/Shared/AppGroup"]) return path;
+    return real;
+}
+
+// The group container root from the path an App Group token covers:
+// "/private/var/mobile/Containers/Shared/AppGroup/<one name>/Library/Caches"
+// gives ".../AppGroup/<one name>"; anything else gives nil.
+static inline NSString *WQGroupRootFromTokenPath(NSString *path)
+{
+    if (!path.length) return nil;
+    NSString *p = WQCanonicalVarPath(path);
+    if (![p hasSuffix:@"/Library/Caches"]) return nil;
+    NSString *root = [p substringToIndex:p.length - @"/Library/Caches".length];
+    if (![root.stringByDeletingLastPathComponent isEqualToString:@"/private/var/mobile/Containers/Shared/AppGroup"]) return nil;
+    NSString *name = root.lastPathComponent;
+    if (!name.length || [name isEqualToString:@"."] || [name isEqualToString:@".."]) return nil;
+    return root;
+}
+
+// Apple patched worse_query in iOS 27.3 beta 2 (build 24C5049d; beta 1 was
+// 24C5037i and still works). `build` is kern.osversion, e.g. "24C5049d":
+// iOS major - 3 as a number, a letter per minor-release train, then the build
+// (betas 5xxx, releases below 1000). Patched: every later train and iOS, and
+// in the 24C train every build except betas before 24C5049. NO for an
+// unreadable build.
+static inline BOOL WQWorseQueryPatchedBuild(NSString *build)
+{
+    const char *s = build.UTF8String;
+    if (!s) return NO;
+    int major = 0, number = 0, digits = 0;
+    while (*s >= '0' && *s <= '9') { major = major * 10 + (*s++ - '0'); digits++; }
+    if (!digits || *s < 'A' || *s > 'Z') return NO;
+    char train = *s++;
+    digits = 0;
+    while (*s >= '0' && *s <= '9' && digits < 6) { number = number * 10 + (*s++ - '0'); digits++; }
+    if (!digits) return NO;
+    if (major != 24) return major > 24;
+    if (train != 'C') return train > 'C';
+    return !(number >= 5000 && number < 5049);
+}
+
 #endif

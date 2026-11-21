@@ -198,3 +198,51 @@ BOOL wq_sqlite_save(sqlite3 *copyDB, NSString *original, NSDictionary *state,
     if (newState) *newState = wq_sqlite_source_state(original);
     return YES;
 }
+
+static BOOL wq_sqlite_is_database_file(NSString *path)
+{
+    int fd = wq_open_for_reading(path);
+    if (fd < 0) return NO;
+    char header[16] = {0};
+    BOOL yes = pread(fd, header, sizeof header, 0) == (ssize_t)sizeof header && memcmp(header, "SQLite format 3", 16) == 0;
+    close(fd);
+    return yes;
+}
+
+BOOL wq_sqlite_restore_sidecars(NSString *original, NSString *backup, NSMutableArray<NSString *> *units, NSString **error)
+{
+    if (!wq_sqlite_is_database_file(backup)) return YES;
+    NSString *dir = nil, *empty = nil;
+    BOOL ok = YES;
+    for (NSString *suffix in @[@"-wal", @"-shm"]) {
+        NSString *live = wq_sqlite_side(original, suffix);
+        struct stat st;
+        if (!wq_stat(live, &st)) continue;              // none: nothing newer on top
+        if (!S_ISREG(st.st_mode)) {
+            ok = wq_sqlite_fail(error, WQLocalizedFormat(@"%@ is not a regular file, so the restored database could open with other data. Remove it and restore again.", live.lastPathComponent));
+            break;
+        }
+        if (st.st_size == 0) continue;
+        NSString *source = wq_sqlite_side(backup, suffix);
+        struct stat bs;
+        if (!(wq_stat(source, &bs) && S_ISREG(bs.st_mode))) {
+            if (!empty) {
+                dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"wq-sqlite-restore-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+                [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+                empty = [dir stringByAppendingPathComponent:@"empty"];
+                [NSFileManager.defaultManager createFileAtPath:empty contents:[NSData data] attributes:nil];
+            }
+            source = empty;
+        }
+        NSString *unit = nil, *writeError = nil;
+        if (!wq_write_from_file_with_backup(live, source, &unit, &writeError)) {
+            ok = wq_sqlite_fail(error, WQLocalizedFormat(@"%@ could not be reset: %@", live.lastPathComponent, writeError ?: @"?"));
+            break;
+        }
+        if (unit) [units addObject:unit];
+        wq_log(@"restore %@: %@ %@ (newer data kept in %@)", original.lastPathComponent, suffix,
+               source == empty ? @"emptied" : @"restored from the backup", unit.lastPathComponent ?: @"?");
+    }
+    if (dir) [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
+    return ok;
+}

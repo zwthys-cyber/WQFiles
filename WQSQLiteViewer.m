@@ -184,21 +184,24 @@ static NSString *wq_sqlite_rowid_alias(sqlite3 *db, NSString *table)
 // Text typed for a field, bound the way the field held its value before:
 // numbers stay numbers when the text is one; everything else is text (the
 // column's affinity may still convert it).
-static void wq_sqlite_bind_typed(sqlite3_stmt *stmt, int index, NSString *text, int previousType)
+static BOOL wq_sqlite_bind_typed(sqlite3_stmt *stmt, int index, NSString *text, int previousType)
 {
     NSString *t = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
     NSScanner *scanner = [NSScanner scannerWithString:t];
     scanner.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     long long i = 0;
     double d = 0;
-    if (previousType == SQLITE_INTEGER && [scanner scanLongLong:&i] && scanner.isAtEnd) { sqlite3_bind_int64(stmt, index, i); return; }
+    if (previousType == SQLITE_INTEGER && [scanner scanLongLong:&i] && scanner.isAtEnd) { sqlite3_bind_int64(stmt, index, i); return YES; }
     scanner.scanLocation = 0;
     if ((previousType == SQLITE_FLOAT || previousType == SQLITE_INTEGER) && [scanner scanDouble:&d] && scanner.isAtEnd) {
         sqlite3_bind_double(stmt, index, d);
-        return;
+        return YES;
     }
-    NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    // Text that can't be encoded is refused, not written as '' (review DR-29).
+    NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
+    if (!utf8) return NO;
     sqlite3_bind_text(stmt, index, utf8.length ? utf8.bytes : "", (int)utf8.length, SQLITE_TRANSIENT);
+    return YES;
 }
 
 @interface WQSQLiteRowViewController : UITableViewController <WQUnsavedEditing>
@@ -295,7 +298,11 @@ static void wq_sqlite_bind_typed(sqlite3_stmt *stmt, int index, NSString *text, 
         [self setColumn:column text:nil];
     })];
     [alert addAction:wq_alert_action(@"Save", UIAlertActionStyleDefault, ^(UIAlertAction *__unused a) {
-        [self setColumn:column text:alert.textFields.firstObject.text ?: @""];
+        NSString *typed = alert.textFields.firstObject.text ?: @"";
+        // Unchanged text writes nothing: a NULL stays NULL instead of
+        // becoming '', and a number keeps its exact value (review DR-29).
+        if ([typed isEqualToString:current]) return;
+        [self setColumn:column text:typed];
     })];
     alert.preferredAction = alert.actions.lastObject;
     [self presentViewController:alert animated:YES completion:nil];
@@ -319,14 +326,16 @@ static void wq_sqlite_bind_typed(sqlite3_stmt *stmt, int index, NSString *text, 
         if (sqlite3_prepare_v2(snapshot.db, sql.UTF8String, -1, &stmt, NULL) != SQLITE_OK) {
             error = @(sqlite3_errmsg(snapshot.db));
         } else {
-            if (text) wq_sqlite_bind_typed(stmt, 1, text, previousType);
+            BOOL bound = YES;
+            if (text) bound = wq_sqlite_bind_typed(stmt, 1, text, previousType);
             else sqlite3_bind_null(stmt, 1);
             sqlite3_bind_int64(stmt, 2, rowid);
-            int rc = sqlite3_step(stmt);
+            int rc = bound ? sqlite3_step(stmt) : SQLITE_MISUSE;
+            if (!bound) error = WQLocalized(@"The text can't be stored as UTF-8, so nothing was changed.");
             if (rc == SQLITE_ROW) {
                 updatedRowid = sqlite3_column_int64(stmt, 0);
                 if (sqlite3_step(stmt) != SQLITE_DONE) error = @(sqlite3_errmsg(snapshot.db));
-            } else {
+            } else if (bound) {
                 error = rc == SQLITE_DONE ? WQLocalized(@"The row is gone.") : @(sqlite3_errmsg(snapshot.db));
             }
         }

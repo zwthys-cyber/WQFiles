@@ -58,6 +58,12 @@ EXPECTED_BUILD=$(plist_value CFBundleVersion Info.plist)
 EXPECTED_MINIMUM_OS=$(plist_value MinimumOSVersion Info.plist)
 APP_GROUP=$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' entitlements.plist)
 [[ -n "$APP_GROUP" ]] || fail "entitlements.plist has no App Group"
+# WQ Files' folder (Backups, AppBackups) shows in the Files app only with both
+# keys on; 0.9.12 and 0.9.13 shipped without it.
+for key in UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace; do
+    [[ "$(plist_value "$key" Info.plist)" == "true" ]] || \
+        fail "Info.plist $key must be true (WQ Files' folder in the Files app)"
+done
 [[ "$EXPECTED_MINIMUM_OS" == "$MINIMUM_IOS_VERSION" ]] || \
     fail "Info.plist minimum OS $EXPECTED_MINIMUM_OS does not match build policy $MINIMUM_IOS_VERSION"
 
@@ -77,14 +83,50 @@ mkdir -p "$APP"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 xcrun --sdk iphoneos clang -fobjc-arc -fmodules -fmodules-cache-path="$OUT/ModuleCache" -arch arm64 \
     -miphoneos-version-min="$MINIMUM_IOS_VERSION" \
-    -isysroot "$SDK" -Wall -Wextra -Werror -O2 \
-    -framework UIKit -framework Foundation -framework Security -framework UniformTypeIdentifiers \
-    WQCore.m WQAIResources.m WQAccess.m WQLocalization.m WQLaunchServices.m WQUI.m WQSharing.m WQApps.m WQCache.m WQPlistEditor.m WQHexViewer.m WQSQLiteViewer.m WQSQLiteSave.m WQHealth.m WQTrash.m WQArchive.m WQSyntax.m WQMediaStream.m main.m -lsqlite3 -lz -o "$APP/WQFiles"
+    -isysroot "$SDK" -Wall -Wextra -Werror -O2 ${WQ_EXTRA_CFLAGS:-} \
+    -framework UIKit -framework Foundation -framework Security -framework UniformTypeIdentifiers -framework JavaScriptCore \
+    WQCore.m WQAIResources.m WQAccess.m WQScanTask.m WQLocalization.m WQLaunchServices.m WQUI.m WQSharing.m WQApps.m WQCache.m WQPlistEditor.m WQHexViewer.m WQSQLiteViewer.m WQSQLiteSave.m WQHealth.m WQTrash.m WQArchive.m WQSyntax.m WQMediaStream.m WQWebServer.m WQTheme.m WQInspector.m main.m -lsqlite3 -lz -o "$APP/WQFiles"
 cp Info.plist "$APP/Info.plist"
-cp icons/AppIcon*@*.png "$APP/"
+# App icon with the iOS 18+ dark and tinted variants (issue #47): a catalog
+# built from icons/ and compiled by actool into Assets.car plus the classic
+# PNGs; its CFBundleIcons replace the plain PNG list in Info.plist.
+ICON_CATALOG="$OUT/Icons.xcassets"
+mkdir -p "$ICON_CATALOG/AppIcon.appiconset"
+cp icons/AppIcon1024.png icons/AppIcon1024-dark.png icons/AppIcon1024-tinted.png "$ICON_CATALOG/AppIcon.appiconset/"
+cat > "$ICON_CATALOG/Contents.json" <<'JSON'
+{ "info" : { "author" : "xcode", "version" : 1 } }
+JSON
+cat > "$ICON_CATALOG/AppIcon.appiconset/Contents.json" <<'JSON'
+{
+  "images" : [
+    { "filename" : "AppIcon1024.png", "idiom" : "universal", "platform" : "ios", "size" : "1024x1024" },
+    { "appearances" : [ { "appearance" : "luminosity", "value" : "dark" } ],
+      "filename" : "AppIcon1024-dark.png", "idiom" : "universal", "platform" : "ios", "size" : "1024x1024" },
+    { "appearances" : [ { "appearance" : "luminosity", "value" : "tinted" } ],
+      "filename" : "AppIcon1024-tinted.png", "idiom" : "universal", "platform" : "ios", "size" : "1024x1024" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 }
+}
+JSON
+xcrun actool "$ICON_CATALOG" --compile "$APP" --platform iphoneos \
+    --minimum-deployment-target "$MINIMUM_IOS_VERSION" --target-device iphone --target-device ipad \
+    --app-icon AppIcon --output-partial-info-plist "$OUT/icon-info.plist" \
+    --errors --warnings --output-format human-readable-text >/dev/null || fail "actool could not compile the app icon"
+[[ -f "$APP/Assets.car" ]] || fail "actool wrote no Assets.car"
+for key in CFBundleIcons 'CFBundleIcons~ipad'; do
+    /usr/libexec/PlistBuddy -c "Delete :$key" "$APP/Info.plist" >/dev/null 2>&1 || true
+done
+/usr/libexec/PlistBuddy -c "Merge $OUT/icon-info.plist" "$APP/Info.plist" >/dev/null
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' "$APP/Info.plist")" == AppIcon ]] || \
+    fail "Info.plist has no catalog app icon"
 for lproj in "$ROOT"/*.lproj; do
     [[ -d "$lproj" ]] && cp -R "$lproj" "$APP/"
 done
+# The example themes ship in the app (Settings → Theme shows them built in).
+if compgen -G "$ROOT/themes/*.wqtheme" >/dev/null; then
+    mkdir -p "$APP/Themes"
+    cp "$ROOT"/themes/*.wqtheme "$APP/Themes/"
+fi
 plutil -convert binary1 "$APP/Info.plist"
 codesign -f -s - --entitlements entitlements.plist "$APP"
 

@@ -173,10 +173,21 @@ static void TestIntegerParsing(void)
     }
 }
 
+static void TestFractionalDates(void)
+{
+    NSDate *whole = [NSDate dateWithTimeIntervalSinceReferenceDate:1000];
+    NSDate *fraction = [NSDate dateWithTimeIntervalSinceReferenceDate:1000.75];
+    WQCheck(!WQPHasFractionalDate(whole));
+    WQCheck(WQPHasFractionalDate(fraction));
+    WQCheck(!WQPHasFractionalDate(@{@"a": @[whole, @1, @"x"]}));
+    WQCheck(WQPHasFractionalDate(@{@"a": @[@{@"b": fraction}]}));
+}
+
 int main(void)
 {
     @autoreleasepool {
         TestInputLimits();
+        TestFractionalDates();
         TestPreviewAndSerializedLimits();
         TestFormatPolicy();
         TestKeyedArchiveUIDs();

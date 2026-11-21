@@ -1,0 +1,66 @@
+{
+  "name": "Midnight",
+  "author": "WQ Files",
+  "dark": {
+    "background": [
+      "#05070F",
+      "#0B1226"
+    ],
+    "glows": [
+      "#2F6BFF9E",
+      "#00C2FF66",
+      "#7A5CFF55",
+      "#00E0B03A"
+    ],
+    "accent": "#5AA9FF",
+    "card": "#1A2A5C33",
+    "plain": "#05070F"
+  },
+  "light": {
+    "background": [
+      "#EEF3FF",
+      "#DCE6FF"
+    ],
+    "glows": [
+      "#7FA8FF80",
+      "#7FE0FF60",
+      "#B9A8FF55",
+      "#7FF0D040"
+    ],
+    "accent": "#2F6BFF"
+  },
+  "tiles": {
+    "blue": [
+      "#6FB6FF",
+      "#2F6BFF"
+    ],
+    "sky": [
+      "#7FE0FF",
+      "#1FA5E0"
+    ],
+    "violet": [
+      "#A08CFF",
+      "#5B3FE0"
+    ],
+    "indigo": [
+      "#8C9CFF",
+      "#3A4BD0"
+    ],
+    "mint": [
+      "#5FF0D0",
+      "#0FA88C"
+    ],
+    "orange": [
+      "#7FC4FF",
+      "#3570E8"
+    ],
+    "amber": [
+      "#9FDCFF",
+      "#3A8FD9"
+    ],
+    "pink": [
+      "#B9A8FF",
+      "#6E4DE8"
+    ]
+  }
+}

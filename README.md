@@ -3,7 +3,15 @@
 **WQ Files** is a file browser, app data manager and cache cleaner for iOS 26
 and 27. "WQ" stands for worse_query, the sandbox technique it is built on. It
 reaches other apps' and system containers with no jailbreak and no kernel
-exploit. Tested on iOS 26.7.1, 27.0.1, 27.2.1 and the 27.3 beta (confirmed by a user).
+exploit. Tested on iOS 26.5 to 27.3 beta 1; see [Tested devices](#tested-devices).
+
+> [!WARNING]
+> **Apple patched worse_query in iOS 27.3 beta 2** (build 24C5049d). WQ Files
+> can't open other apps' folders there or on any later build, and its startup
+> check says so. It works up to iOS 27.3 beta 1 (24C5037i) and on iOS 26.0 to
+> 26.7.2. Don't update to the 27.3 beta 2 or later if you want to keep using it.
+
+<p align="center"><img src="screenshots/ipad-home.webp" width="520" alt="WQ Files home screen on iPad"></p>
 
 **iOS 26 (26.0 to 26.7.2):** supported since 0.7; tested on 26.7.1. worse_query reaches the app, extension, daemon and app group
 containers there, but not System Data or the system groups, so WQ Files hides
@@ -14,12 +22,31 @@ remembered). Internal Daemons aren't in that database: the first scan for them
 takes long, later ones only check new files. Apps, backups, restores, clearing
 app data, the Cache Cleaner and the file browser work as on iOS 27. App icons
 don't: iOS 26 hands WQ Files only placeholder icons and doesn't let it read
-other apps' bundles, so apps show symbol tiles.
+other apps' bundles, so apps show a placeholder (see App Store Icons below).
 
 WQ Files is available in English, German, Italian, Spanish, Portuguese
-(Brazil), Russian, Polish, Turkish, Thai, Korean, Arabic and Simplified Chinese. It follows
+(Brazil), Russian, Polish, Turkish, Thai, Vietnamese, Korean, Arabic, Japanese and Simplified Chinese. It follows
 the device language; **Language** in WQ Files' Settings picks another, used
 from the next start.
+
+## Tested devices
+
+Tested by the maintainer on:
+
+| Device | iOS |
+|---|---|
+| iPhone 16 Pro Max (iPhone17,2) | 27.2.1 |
+| iPhone 17 Pro Max (iPhone18,2) | 27.0.1 |
+| iPad Air 5 | iPadOS 27.0.1 |
+| iPhone 14 Pro (iPhone15,2) | 26.7.1 |
+
+Users have also reported it working on iOS 26.5, 27.2 and 27.3 beta 1. It does
+not work on 27.3 beta 2 or later (see above).
+Works on a device or iOS version not listed here? Open an issue with the Log
+(Settings → Log → Share).
+
+**Not supported:** iOS 18 and older. worse_query doesn't exist there; WQ Files shows a notice instead of scanning. On iOS 17 and 18 use
+[Cyanide](https://github.com/kolbicz/Cyanide).
 
 ## What it opens
 
@@ -58,12 +85,36 @@ new files.
   into a normal verified backup of that app, ready to restore; data that says
   it belongs to a different app asks first. Show all apps, only Apple's, only others, only backed-up
   ones, or only installed or offloaded ones (when nearly every app's state can be read); long-press to copy the bundle ID or container path.
-  Apps and the Cache Cleaner keep their list between visits and rescan on
-  their own after 10 minutes; pull down to rescan any time. `tmp` is intentionally ephemeral: clear removes it, but app
+  Apps and the Cache Cleaner keep their last results, including across app
+  launches. Scanning is a task, not a page lifetime: switch tabs or leave the
+  screen without discarding work. **Pause Scan** keeps progress; **Resume Scan**
+  continues it. Pull to refresh explicitly starts a new measurement, while the
+  previous result stays visible with its timestamp. There is no automatic
+  ten-minute rescan.
+  When iOS backgrounds the app, scan workers pause at a work boundary and
+  continue on return. After termination, opening the relevant screen resumes an
+  interrupted task; an explicitly paused task stays paused. Completed inode
+  ranges and directory measurements are saved in app-private Application Support
+  (excluded from backups). A restart may replay the current directory and work
+  since the last checkpoint (writes are coalesced to about one second), not the
+  whole scan. Sizes can include earlier measurements: refresh for current sizes.
+  The filesystem is not a snapshot; cache cleaning still revalidates target
+  identities before deleting anything, and restored results are not preselected.
+  Read-only scan orchestration uses its own queue; directory measurement yields
+  the serial mutation queue between directories so other file operations can run.
+  iOS still controls when a suspended or terminated app can execute.
+  `tmp` is intentionally ephemeral: clear removes it, but app
   backups do not include it and restore leaves the current `tmp` untouched.
 - **Cache Cleaner**: cache and temp size per app, with search, Select All /
-  None / Large Caches (50 MB+) and crash logs. Long-press an app to jump to its
-  Caches, tmp or data folder.
+  Invert / None / Large Caches (50 MB+) and crash logs. Long-press an app to
+  jump to its Caches, tmp or data folder. **Your own folders and files:**
+  long-press one inside an app's data (for example Instagram's
+  `Library/Application Support/Instagram/VideoUpload`, which keeps uploaded
+  videos) → **Add to Cache Cleaner**, choosing **Always Select** (selected
+  after every scan and by Select All, like caches) or **Select by Hand**. It
+  then appears there as "Added by you"; a folder is emptied, a file deleted.
+  Long-press it in the Cache Cleaner to switch Select Automatically. Stored by app, so it keeps working after the app moves to a
+  new container. Long-press it in the Cache Cleaner to remove it from the list.
 - **Files**: browse, read and share files; each opens in the fitting tool,
   and **Open As** switches between them. Saving writes back in place (same
   inode, owner and attributes). Create folders, import files (several at
@@ -118,6 +169,10 @@ new files.
 - **Show Item Counts** (Settings, off by default): folders show how many
   items they hold. Every subfolder is listed for this, which slows down
   folders with many subfolders.
+- **Show Folder Sizes** (Settings, off by default): folders, App Data included,
+  show how much space they take, measured in the background with the rows on
+  screen first. Sizes are kept for ten minutes; pull down to measure again.
+  Sorting by size uses them once every folder is measured.
 - **Keep Data Before Restore** (Settings, on by default): restoring an app
   backup or a file backup first backs up what's there now, so a failed restore
   can be undone. Turn it off to delete that backup once the restore succeeded.
@@ -125,18 +180,134 @@ new files.
   folder you were in, once the startup check has passed.
 - **Check for Updates** (Settings, on by default): at most twice a day WQ
   Files downloads the public `source.json` from this repository and shows a
-  note on the start screen when a newer version is out. This is its only
-  network access; nothing about the device or its data is sent. Turn it off to
-  keep WQ Files fully offline.
+  note on the start screen when a newer version is out. This is the only
+  connection WQ Files makes itself (Wi-Fi Sharing only listens while its screen
+  is open); nothing about the device or its data is sent. Turn it off to keep
+  WQ Files fully offline.
 - **New Design** (Settings, on by default): the start screen with container
   cards and Home, Apps, Clean and Backups tabs; Settings opens from the gear.
   Turn it off for the classic design: one list with Containers, Tools and
   Settings. The switch takes effect right away.
+- **Wi-Fi Sharing** (a folder's ⋯ menu → **Share on Wi-Fi…**): a web page for
+  that folder, opened in any browser on the same Wi-Fi (address and QR code on
+  screen). Browse, open and download files, download folders as ZIP, and with
+  **Allow Uploads** add files by button or drag and drop; nothing is ever
+  overwritten or deleted. Password protected (user `wq`, a new random password
+  each time, or a fixed one in **Settings → Sharing Password**, kept in the
+  keychain). It stops when you close the screen or leave WQ Files. The page
+  follows the design and theme.
+- **Recent**: the clock button on the start screen lists the last folders and
+  files you opened, with the app they belong to; **Show All** has long-press
+  actions (Add to Favorites, Copy Path, Remove).
 
 App names come from LaunchServices' own database, read from lsd's container
 (the LaunchServices API itself refuses this app on 27.x). Apple services that
-only have localized names use a built-in table. Services without an icon get a
-symbol tile.
+only have localized names use a built-in table. Apple services without an icon
+get a symbol tile.
+
+Other apps' icons can't be read with worse_query, so they show a neutral
+placeholder. **Settings → App Store Icons** (off by default) fetches them from
+Apple's public App Store lookup instead: one request per 50 apps, in your
+region's store and then the US store. This sends the bundle IDs of your apps
+and your region to Apple. Icons are kept as small PNGs (a few KB each) and not
+backed up; sideloaded or removed apps keep the placeholder, and are asked
+for again after a week. Turning the setting off deletes the downloaded icons.
+
+## Custom inspectors
+
+Small JavaScript programs that show a file's contents your way ([#45](https://github.com/kolbicz/WQFiles/issues/45)).
+WQ Files ships only the runtime; the inspectors are yours. Long-press a file →
+**Open As → Custom Inspector…**. When one inspector matches the file's
+extension it opens directly, otherwise you pick one.
+
+**Installing:** open a `.zip` holding an inspector with WQ Files (share sheet,
+AirDrop or the Files app → Share → WQ Files): it is checked and installed,
+and installing one with the same name again updates it. Or copy the folder
+into WQ Files' **Inspectors** folder yourself: **Settings → Inspectors** (in
+the classic design under Tools) opens it, with Import Folder / Import Files in
+its ⋯ menu, and the Files app shows it under On My iPhone → WQ Files. One
+folder per inspector:
+
+```
+Inspectors/
+  JSON Summary/
+    manifest.json   { "name": "JSON Summary", "api": 1, "extensions": ["json"] }
+    inspect.js
+    data.json       optional reference data (lookup tables, schemas)
+```
+
+`manifest.json`: `name` (1–80 characters), `api` (must be `1`), `extensions`
+(for example `["json", "plist"]`, or `["*"]` for any file). Optional: `script`
+(default `inspect.js`), `data` (default `data.json` when present), `description`.
+
+`inspect.js` defines `inspect(input, data)` and returns what to show:
+
+```javascript
+function inspect(input, data) {
+  const record = JSON.parse(input.text);
+  return {
+    title: "My inspector",                       // optional
+    sections: [
+      { title: "Details", rows: [
+          { label: "Name", value: record.name },
+          { label: "Type", value: data.types[record.type] ?? "Unknown" } ] },
+      { title: "Raw", text: input.text }           // monospaced text
+    ]
+  };
+}
+```
+
+`input` has `name`, `extension`, `size`, `truncated`, `bytes` (a `Uint8Array`
+of at most 8 MB of the file), `text` (the bytes as UTF-8, or `null`) and
+`plist` (the file parsed as a property list, or `null`; dates become ISO 8601
+strings, data becomes base64). Row values can be any JSON value; objects and
+arrays are shown as JSON. `console.log(...)` lines appear under the result.
+
+Tap a value to copy it; Share sends the whole result as text. Inspectors are
+read-only: scripts run off the main thread with a 2-second limit and have no
+access to files, the network or the app. Results are capped at 100 sections,
+5,000 rows and 20,000 characters per text. Errors (with the line number) are
+shown in place of the result. Two examples are in
+[`examples/inspectors`](examples/inspectors).
+
+## Themes
+
+**Settings → Theme** sets the colors of the new design: **Default**, **Custom Color** (pick one color, WQ Files derives the rest) or a theme you import. **Plain Background** works with all of them, and **Colored Cards** (on by default) tints the start screen's cards in the color of their icon. A theme also colors the Wi-Fi Sharing page.
+
+A theme is a small JSON file with the extension `.wqtheme`. Open one with WQ Files (share sheet or Files app) or use **Import Theme…**; **Export Current Colors…** writes the colors you use now as a starting point. WQ Files comes with the two themes in [`themes/`](themes) (Midnight and Sunset) built in; an imported theme with the same name replaces the built-in one.
+
+```json
+{
+  "name": "Midnight",
+  "author": "you",
+  "dark": {
+    "background": ["#05070F", "#0B1226"],
+    "glows": ["#2F6BFF9E", "#00C2FF66", "#7A5CFF55", "#00E0B03A"],
+    "accent": "#5AA9FF",
+    "card": "#1A2A5C33",
+    "plain": "#05070F"
+  },
+  "light": {
+    "background": ["#EEF3FF", "#DCE6FF"],
+    "glows": ["#7FA8FF80", "#7FE0FF60"],
+    "accent": "#2F6BFF"
+  }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `name` | 1–40 characters, required. A theme with the same name replaces the installed one. |
+| `author` | Optional. |
+| `dark`, `light` | Colors for each appearance. At least one is required; a missing one uses the other. |
+| `background` | One color, or two for a top-to-bottom gradient. Required. |
+| `glows` | Up to four soft color spots on the background, usually semi-transparent. |
+| `accent` | Buttons, tabs and links. |
+| `card` | A tint laid over the cards' blur. |
+| `plain` | The solid color used with Plain Background (default: the first background color). |
+| `tiles` | Top level, next to `name`: colors of the icon tiles (and Colored Cards) by name: `blue`, `sky`, `violet`, `indigo`, `mint`, `amber`, `orange`, `pink`, `gray`, or `all` for every tile not named. One color or two (gradient), e.g. `"tiles": {"sky": ["#8AD9FF", "#2C94E8"], "all": "#5B3FE0"}`. |
+
+Colors are `#RRGGBB` or `#RRGGBBAA`. Unknown keys are ignored, files over 64 KB are refused, and WQ Files names the problem when a file isn't valid. Themes change colors only, not the layout.
 
 ## Safety
 
@@ -186,12 +357,25 @@ and only change what you understand.
   leave it partly usable (app names, an untested iOS version) are shown once as
   a warning. The result is in **Log** as `health: …`.
 
+- **iOS 27.3 beta 2 or later**: Apple patched worse_query there. The startup
+  check recognizes these builds by their build number: when no folder opens,
+  it says the patch is the reason (and offers no Reset Access Cache, which
+  can't help); the iOS version row warns about it even if some folders still
+  open. Stay on 27.3 beta 1 or earlier.
+
+- **LiveContainer**: inside LiveContainer, iOS reports WQ Files' App Group as
+  a stand-in folder in LiveContainer's own group, while access tokens are
+  issued for the real group folder. WQ Files uses the real one (Log:
+  `App group: LiveContainer stand-in …; using the real group folder …`).
+
 - **Every folder refused (`token cache recovery failed`)**: WQ Files briefly
   swaps its own `Library/Caches` folder in the App Group to get each access
   token. If a swap was interrupted, or another app sharing the App Group
   changed that folder, it refuses every token instead of risking the
   contents. The Log line says what it found (swap marker, preserved Caches,
-  what Caches is now). **Settings → Troubleshooting → Reset Access Cache**
+  what Caches is now). WQ Files now repairs this by itself (at most once a
+  minute; Log: `grant: access cache repaired automatically`).
+  **Settings → Troubleshooting → Reset Access Cache**
   (also on the startup check screen) puts the folder back; nothing is deleted.
   If it keeps coming back, another app signed with the same App Group is
   changing it.
@@ -276,12 +460,24 @@ existing release description is preserved when no new notes are supplied.
 
 ## Regression tests
 
-Run `./tests/run_all_tests.sh` on macOS with Xcode and Python 3. It runs twelve
+Run `./tests/run_all_tests.sh` on macOS with Xcode and Python 3. It runs
 portable Foundation fixture executables, the Python release fixtures, static
 browser checks, and strict iOS arm64 compilation/linkage. Logs and generated
 files stay under `.work/tests/`; the existing IPA is not replaced. With only
 Command Line Tools installed, set `WQ_SKIP_IOS_CHECK=1` to run the host tests.
 Set `WQ_ASAN=1` to compile the host fixtures with AddressSanitizer.
+
+For UIKit navigation and recovery checks on a disposable, booted simulator, run
+`WQ_SIMULATOR_UDID=<device-id> ./tests/run_scan_ui_tests.sh`. It runs the real
+Apps/Clean controllers with fixture task results, switches tabs, rebuilds a
+screen, backgrounds the app via Settings, terminates/relaunches it, and checks
+that foreground I/O can run between measurement steps. It does not open
+Simulator.app or exercise the sandbox technique. A screenshot and build artifacts
+are retained under `.work/tests/`.
+
+The host recovery fixtures also terminate a scan process without a shutdown
+callback and verify recovery in a new process, including out-of-order inode
+chunks, changed root identity, failed writes, and rapid pause/resume races.
 
 These tests use disposable files and entitlement/access doubles. They do not
 issue sandbox tokens or mutate installed app containers. Real iOS signing,
@@ -290,8 +486,8 @@ concurrent writes still require supported-device validation.
 
 ## Translations
 
-WQ Files is in English, German, Italian, Spanish, Portuguese (Brazil), Russian, Polish, Turkish, Thai, Korean,
-Arabic and Simplified Chinese. New languages and corrections are welcome as pull requests:
+WQ Files is in English, German, Italian, Spanish, Portuguese (Brazil), Russian, Polish, Turkish, Thai,
+Vietnamese, Korean, Arabic, Japanese and Simplified Chinese. New languages and corrections are welcome as pull requests:
 
 - **Correct a translation:** edit the line in `<language>.lproj/Localizable.strings`
   (for example `it.lproj`). The English text on the left is the key; change
@@ -305,7 +501,7 @@ Arabic and Simplified Chinese. New languages and corrections are welcome as pull
   English text, and leave paths, file names and `WQ Files` as they are.
   `python3 -m unittest tests.test_localization` checks this.
 
-German, Italian, Spanish, Portuguese, Polish, Turkish and Thai, and the newest Chinese, Arabic and Korean strings, are
+German, Italian, Spanish, Portuguese, Polish, Turkish and Thai, and the newest Chinese, Arabic, Korean and Japanese strings, are
 machine translations so far: corrections from native speakers are especially
 welcome.
 
@@ -322,6 +518,8 @@ welcome.
 - Korean translation: [hooray804](https://github.com/hooray804)
 - Russian translation: [Reinascape](https://github.com/Reinascape)
   ([#40](https://github.com/kolbicz/WQFiles/pull/40)).
+- Vietnamese translation: [romlayvn-93](https://github.com/romlayvn-93)
+  ([#62](https://github.com/kolbicz/WQFiles/pull/62)).
 
 WQ Files is GPL-3.0-or-later (see `LICENSE`).
 
@@ -379,3 +577,10 @@ Research references:
 Build 89 device feedback (iOS 27.0.1) denied both downloaded model candidate
 paths with EPERM and returned ENOENT for the other six candidates. Build 90
 therefore remains diagnostic; AI cleanup is not implemented or verified.
+
+
+## Fork update: 0.9.19 (114)
+
+Merged the complete upstream 0.9.19 release at `a0cdeb1`, including custom inspectors, scan recovery, themes, sharing and file-operation fixes, updated icons and translations. Preserved this fork's AI model resource diagnostics and its tests. The classic Tools menu keeps Recent, Inspectors and AI Model Resources as separate entries. The two newly added languages use English fallbacks for fork-only AI diagnostics labels.
+
+This fork uses build 114. Compilation, the full regression preflight, arm64 signing/package verification and disposable UIKit simulator lifecycle checks run in GitHub Actions. No device sandbox-access test is performed by CI; the re-signed IPA still requires the user's supported device and a valid App Group.

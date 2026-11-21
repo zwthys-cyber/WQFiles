@@ -36,6 +36,9 @@ NSArray<WQHealthCheck *> *wq_health_run(void (^_Nullable stage)(NSString *text))
 // on this device, as found by the last wq_health_run. NO until it ran.
 BOOL wq_app_bundles_reachable(void);
 
+// This build is iOS 27.3 beta 2 or later, where Apple patched worse_query.
+BOOL wq_worse_query_patched(void);
+
 // The worst state among the checks.
 WQHealthState wq_health_worst(NSArray<WQHealthCheck *> *checks);
 

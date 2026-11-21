@@ -12,6 +12,9 @@ xcrun --sdk macosx clang -fobjc-arc -fmodules -isysroot "$SDK" \
 for lproj in ./*.lproj; do
     cp -R "$lproj" "$OUT/"
 done
-for language in en de it es pt-BR pl ru ko zh-Hans ar; do
+# Every shipped language, taken from the .lproj folders (review DR-52).
+for lproj in ./*.lproj; do
+    language=$(basename "$lproj" .lproj)
+    [ "$language" = Base ] && continue
     "$OUT/WQLocalizationTests" "$language" -AppleLanguages "($language)"
 done

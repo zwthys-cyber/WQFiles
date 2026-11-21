@@ -3,6 +3,7 @@
 //  WQ Files
 //
 
+#import "WQSQLiteSave.h"
 #import "WQTrash.h"
 #import "WQAccess.h"
 #import "WQLocalization.h"
@@ -177,6 +178,9 @@ BOOL wq_restore_deleted(WQDeletedItem *item, NSString **errorText)
         [identities addObject:identity];
     }
     if (ok) ok = wq_create_file_from(item.originalPath, item.backupPath, errorText);
+    // A deleted SQLite database whose -wal/-shm stayed behind would reopen
+    // with them; they're kept in Backups and replaced or emptied.
+    if (ok) ok = wq_sqlite_restore_sidecars(item.originalPath, item.backupPath, nil, errorText);
     if (!ok) {
         for (NSUInteger i = created.count; i-- > 0; ) {
             if (!wq_delete_expecting(created[i], identities[i], NULL)) break;   // not empty or not ours: stop there

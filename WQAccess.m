@@ -13,6 +13,7 @@
 //
 
 #import "WQAccess.h"
+#import "WQScanJournal.h"
 #import "WQCore.h"
 #import "WQAccessSafety.h"
 #import "WQLocalization.h"
@@ -46,6 +47,31 @@
 
 @end
 
+static NSCondition *wq_scan_condition(void)
+{
+    static NSCondition *condition;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ condition = [NSCondition new]; });
+    return condition;
+}
+static BOOL gScansPaused;
+void wq_scan_set_paused(BOOL paused)
+{
+    NSCondition *condition = wq_scan_condition();
+    [condition lock];
+    gScansPaused = paused;
+    [condition broadcast];
+    [condition unlock];
+}
+BOOL wq_scan_wait(WQScanCancellation *cancellation)
+{
+    NSCondition *condition = wq_scan_condition();
+    [condition lock];
+    while (gScansPaused && !cancellation.isCancelled) [condition waitUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+    [condition unlock];
+    return !cancellation.isCancelled;
+}
+
 #pragma mark - Log
 
 static NSMutableString *gLog;
@@ -53,6 +79,9 @@ static NSLock *gLogLock;
 
 void wq_log(NSString *format, ...)
 {
+    // Callers read errno after logging (e.g. EEXIST after a rename); NSLog
+    // and the string work below can overwrite it.
+    int savedErrno = errno;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ gLog = [NSMutableString new]; gLogLock = [NSLock new]; });
     va_list args;
@@ -63,6 +92,7 @@ void wq_log(NSString *format, ...)
     [gLogLock lock];
     [gLog appendFormat:@"%@\n", line];
     [gLogLock unlock];
+    errno = savedErrno;
 }
 
 NSString *wq_log_text(void)
@@ -81,6 +111,108 @@ typedef struct __SecTask *SecTaskRef;
 extern SecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
 extern CFTypeRef SecTaskCopyValueForEntitlement(SecTaskRef task, CFStringRef entitlement, CFErrorRef *error);
 
+static int64_t wq_query_token_ex(NSString *group, BOOL altFlags, BOOL consumeIt, NSString **covered);
+
+// The App Group folder a token is issued for, read from an unused token
+// (its last field is ".../AppGroup/<UUID>/Library/Caches"). Under
+// LiveContainer this is the only reliable answer: the container manager
+// gives no path and LiveContainer's stand-in can be anywhere (#65).
+static NSString *wq_token_group_root(NSString *group)
+{
+    for (int alt = 0; alt < 2; alt++) {
+        NSString *covered = nil;
+        (void)wq_query_token_ex(group, alt == 1, NO, &covered);
+        NSString *root = WQGroupRootFromTokenPath(covered);
+        if (root) return root;
+    }
+    return nil;
+}
+
+// The group container's path as the container manager knows it: the one
+// worse_query's token is issued for. nil when it can't be asked.
+static NSString *wq_cm_group_path(NSString *group)
+{
+    void *mgr = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!mgr) return nil;
+    void *(*create)(void) = (void *(*)(void))dlsym(mgr, "container_query_create");
+    void (*setClass)(void *, uint64_t) = (void (*)(void *, uint64_t))dlsym(mgr, "container_query_set_class");
+    void (*setGroups)(void *, xpc_object_t) = (void (*)(void *, xpc_object_t))dlsym(mgr, "container_query_set_group_identifiers");
+    void (*iterate)(void *, bool (^)(void *)) = (void (*)(void *, bool (^)(void *)))dlsym(mgr, "container_query_iterate_results_sync");
+    void (*freeQuery)(void *) = (void (*)(void *))dlsym(mgr, "container_query_free");
+    const char *(*getPath)(void *) = (const char *(*)(void *))dlsym(mgr, "container_object_get_path");
+    __block NSString *found = nil;
+    if (create && setClass && setGroups && iterate && freeQuery && getPath) {
+        void *query = create();
+        if (query) {
+            setClass(query, 7);   // app group container
+            setGroups(query, xpc_string_create(group.UTF8String));
+            iterate(query, ^bool(void *object) {
+                const char *path = object ? getPath(object) : NULL;
+                if (path && path[0]) { found = @(path); return false; }
+                return true;
+            });
+            freeQuery(query);
+        }
+    }
+    dlclose(mgr);
+    return found.length ? found : nil;
+}
+
+static BOOL wq_is_dir(NSString *path)
+{
+    struct stat st;
+    return path.length && lstat(path.fileSystemRepresentation, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static NSString *wq_group_root(NSString *group)
+{
+    if (!group) return nil;
+    static NSMutableDictionary<NSString *, NSString *> *roots;
+    @synchronized (NSFileManager.class) {
+        if (roots[group]) return roots[group];
+    }
+    NSString *path = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:group].path;
+    NSString *root = nil;
+    // 1. The folder access tokens are really issued for decides (#65).
+    //    Under LiveContainer, NSFileManager's answer is a stand-in for every
+    //    group except the one LiveContainer itself uses.
+    NSString *tokenRoot = wq_token_group_root(group);
+    if (tokenRoot && wq_is_dir(tokenRoot)) {
+        root = tokenRoot;
+        if (!path.length) wq_log(@"App group %@: NSFileManager gives no folder; access tokens are issued for %@", group, tokenRoot);
+        else if (![tokenRoot isEqualToString:WQCanonicalVarPath(path)])
+            wq_log(@"App group %@: access tokens are issued for %@; using it instead of %@", group, tokenRoot, path);
+        else wq_log(@"App group %@: access tokens are issued for its folder", group);
+    } else if (tokenRoot) {
+        wq_log(@"App group %@: tokens are issued for %@, but it can't be reached (%@)", group, tokenRoot, wq_errno(errno));
+    } else {
+        wq_log(@"App group %@: an access token didn't say which folder it is for", group);
+    }
+    // 2. Without a usable token answer: the container manager's path.
+    if (!root) {
+        NSString *managed = WQCanonicalVarPath(wq_cm_group_path(group) ?: @"");
+        if (wq_is_dir(managed)) {
+            root = managed;
+            wq_log(@"App group %@: using the container manager's folder %@", group, managed);
+        }
+    }
+    // 3. Last resort: NSFileManager's answer, mapped out of a LiveContainer
+    //    stand-in when it has that shape.
+    if (!root) {
+        root = WQGroupRootForPath(path);
+        if (root && ![root isEqualToString:path]) {
+            if (wq_is_dir(root)) wq_log(@"App group %@: LiveContainer stand-in %@; using the group folder %@", group, path, root);
+            else root = path;
+        }
+    }
+    if (!root) return nil;
+    @synchronized (NSFileManager.class) {
+        if (!roots) roots = [NSMutableDictionary new];
+        roots[group] = root;
+    }
+    return root;
+}
+
 NSString *wq_app_group(void)
 {
     static NSString *group;
@@ -93,13 +225,27 @@ NSString *wq_app_group(void)
             if (value) groups = (__bridge_transfer NSArray *)value;
             CFRelease(task);
         }
+        // Prefer a group whose NSFileManager folder is the one tokens are
+        // issued for: under LiveContainer that is the group LiveContainer
+        // itself uses (it prefers SideStore's, while the entitlement list may
+        // start with AltStore's), elsewhere simply the first group (#65).
+        NSMutableArray *ordered = [NSMutableArray new];
         for (id candidate in groups) {
             if (![candidate isKindOfClass:NSString.class]) continue;
-            NSURL *root = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:candidate];
+            NSString *fm = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:candidate].path;
+            NSString *token = wq_token_group_root(candidate);
+            BOOL agrees = fm.length && token && [token isEqualToString:WQCanonicalVarPath(fm)];
+            if (agrees) [ordered insertObject:candidate atIndex:0]; else [ordered addObject:candidate];
+            if (agrees) break;
+        }
+        for (id candidate in groups)
+            if ([candidate isKindOfClass:NSString.class] && ![ordered containsObject:candidate]) [ordered addObject:candidate];
+        for (NSString *candidate in ordered) {
+            NSString *root = wq_group_root(candidate);
             if (root) {
                 group = candidate;
-                if (!WQRecoverCacheSwapAtPath([root.path stringByAppendingPathComponent:@"Library"]))
-                    wq_log(@"App-group cache recovery requires attention; preserved contents retained: %@ (%@)", root.path, wq_errno(errno));
+                if (!WQRecoverCacheSwapAtPath([root stringByAppendingPathComponent:@"Library"]))
+                    wq_log(@"App-group cache recovery requires attention; preserved contents retained: %@ (%@)", root, wq_errno(errno));
                 break;
             }
         }
@@ -127,6 +273,14 @@ static void wq_release_handle(int64_t handle);
 
 static int64_t wq_query_token(NSString *group, BOOL altFlags)
 {
+    return wq_query_token_ex(group, altFlags, YES, NULL);
+}
+
+// `consumeIt` NO: only ask, for *covered (the path the token is issued for,
+// its last field) without using the token.
+static int64_t wq_query_token_ex(NSString *group, BOOL altFlags, BOOL consumeIt, NSString **covered)
+{
+    if (covered) *covered = nil;
     static void *mgr;
     static cq_create_fn create;
     static cq_set_u64_fn setClass, setFlags, setPart;
@@ -135,6 +289,7 @@ static int64_t wq_query_token(NSString *group, BOOL altFlags)
     static cq_free_fn freeQuery;
     static cq_token_fn copyToken;
     static ext_consume_fn consume;
+    static co_get_path_fn resultPath;
     if (!mgr) {
         mgr = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL);
         if (!mgr) return -2;
@@ -147,6 +302,7 @@ static int64_t wq_query_token(NSString *group, BOOL altFlags)
         freeQuery = (cq_free_fn)dlsym(mgr, "container_query_free");
         copyToken = (cq_token_fn)dlsym(mgr, "container_copy_sandbox_token");
         consume = (ext_consume_fn)dlsym(RTLD_DEFAULT, "sandbox_extension_consume");
+        resultPath = (co_get_path_fn)dlsym(mgr, "container_object_get_path");
     }
     if (!create || !setClass || !setGroups || !setFlags || !setPart || !single || !freeQuery || !copyToken || !consume) return -2;
 
@@ -160,7 +316,31 @@ static int64_t wq_query_token(NSString *group, BOOL altFlags)
         setPart(query, 3);   // Library/Caches
         setFlags(query, altFlags ? 0x0000000800000000ULL : 0x0000008000000000ULL);
         void *result = single(query);
+        // Once, for the Log: the container the token is issued for. It must
+        // be the folder whose Library/Caches was swapped (LiveContainer, #65).
+        static dispatch_once_t logged;
+        if (result && resultPath) dispatch_once(&logged, ^{
+            const char *p = resultPath(result);
+            wq_log(@"grant: token query answers for %s", p && p[0] ? p : "(no path)");
+        });
         token = result ? copyToken(result) : NULL;
+        // For the Log, the first few times: what the token covers. Its fields
+        // after the signature are the extension class, flags, inode and the
+        // path it was issued for; the signature (first field) is left out.
+        static int described;
+        if (token && consumeIt && described < 3) {
+            described++;
+            NSString *text = @(token) ?: @"";
+            NSRange cut = [text rangeOfString:@";"];
+            wq_log(@"grant: token (%@ flags) covers: %@", altFlags ? @"other" : @"standard",
+                   cut.location == NSNotFound ? @"(unreadable)" : [text substringFromIndex:NSMaxRange(cut)]);
+        }
+        if (token && covered) {
+            NSString *text = @(token) ?: @"";
+            NSRange last = [text rangeOfString:@";" options:NSBackwardsSearch];
+            if (last.location != NSNotFound) *covered = [text substringFromIndex:NSMaxRange(last)];
+        }
+        if (!consumeIt) return token ? 0 : (result ? -6 : -5);
         int64_t handle = token ? consume(token) : (result ? -6 : -5);
         return token && handle < 0 ? -7 : handle;
     } @finally {
@@ -207,7 +387,7 @@ static void wq_log_recovery_failure(NSString *libraryPath, int error, NSString *
     static NSUInteger repeats;
     NSString *line = [NSString stringWithFormat:@"%@ (%@; %@)", libraryPath, wq_errno(error), state];
     @synchronized (NSFileManager.class) {
-        if ([line isEqualToString:last]) {
+        if (last && [line isEqualToString:last]) {
             repeats++;
             if (repeats % 25 == 0) wq_log(@"token cache recovery still failing (%lu more times)", (unsigned long)repeats);
             return;
@@ -223,17 +403,22 @@ static int64_t wq_query(NSString *target, BOOL altFlags)
     NSString *group = wq_app_group();
     if (!group) return -1;
     NSFileManager *files = NSFileManager.defaultManager;
-    NSURL *root = [files containerURLForSecurityApplicationGroupIdentifier:group];
+    NSString *root = wq_group_root(group);
     if (!root) return -1;
-    NSString *libraryPath = [root.path stringByAppendingPathComponent:@"Library"];
+    NSString *libraryPath = [root stringByAppendingPathComponent:@"Library"];
     if (![files createDirectoryAtPath:libraryPath withIntermediateDirectories:YES attributes:nil error:nil]) return -4;
     int library = WQOpenDirectoryNoLinks(libraryPath);
     if (library < 0) return -4;
     int lock = WQOpenRegularAt(library, ".wq-caches-lock", O_RDWR | O_CREAT, 0600);
     if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB) != 0) {
+        // A lock that isn't a regular file (a link or folder another app left)
+        // never opens: report it like a blocked cache so wq_grant's automatic
+        // repair moves it aside (review DR-08). A busy lock is just busy.
+        BOOL malformed = lock < 0 && (errno == EINVAL || errno == ELOOP || errno == EISDIR);
+        if (malformed) wq_log(@"grant: the access cache lock in the App Group isn't a regular file (%@)", wq_errno(errno));
         if (lock >= 0) close(lock);
         close(library);
-        return -4;
+        return malformed ? -5 : -4;
     }
     int64_t handle = -4;
     @try {
@@ -241,6 +426,18 @@ static int64_t wq_query(NSString *target, BOOL altFlags)
         // its original inode and nested contents. Next acquisition recovers an
         // interrupted swap from the durable marker, before doing another query.
         if (WQCacheSwapBegin(library, target)) handle = wq_query_token(group, altFlags);
+        else {
+            // Library/Caches isn't in a state a query can start from, e.g. a
+            // link another worse_query app sharing the App Group left behind
+            // (LiveContainer, issue #65). wq_grant repairs it and asks again.
+            handle = -5;
+            static NSString *lastState;
+            NSString *state = [NSString stringWithFormat:@"%@ (%@)", wq_cache_state(library), wq_errno(errno)];
+            if (![state isEqualToString:lastState]) {
+                lastState = state;
+                wq_log(@"grant: the access cache in the App Group can't start a query: %@", state);
+            }
+        }
     } @catch (NSException *exception) {
         wq_log(@"token query exception: %@", exception.reason);
         handle = -9;
@@ -260,9 +457,9 @@ static int64_t wq_query(NSString *target, BOOL altFlags)
 BOOL wq_reset_access_cache(NSString **errorText)
 {
     NSString *group = wq_app_group();
-    NSURL *root = group ? [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:group] : nil;
+    NSString *root = wq_group_root(group);
     if (!root) { if (errorText) *errorText = WQLocalized(@"The App Group is missing."); return NO; }
-    NSString *libraryPath = [root.path stringByAppendingPathComponent:@"Library"];
+    NSString *libraryPath = [root stringByAppendingPathComponent:@"Library"];
     [NSFileManager.defaultManager createDirectoryAtPath:libraryPath withIntermediateDirectories:YES attributes:nil error:nil];
     int library = WQOpenDirectoryNoLinks(libraryPath);
     if (library < 0) { if (errorText) *errorText = wq_errno(errno); return NO; }
@@ -357,6 +554,19 @@ BOOL wq_grant(NSString *path)
     static int preferAlt = -1;
     BOOL altFirst = preferAlt >= 0 ? (BOOL)preferAlt : !wq_system_areas_reachable();
     int64_t handle = wq_query(key, altFirst);
+    // A broken access cache refuses every folder until it is repaired: do
+    // what Settings → Reset Access Cache does (nothing is deleted; anything
+    // in the way is renamed aside), at most once a minute, and ask again.
+    if (handle == -5) {
+        static CFAbsoluteTime lastRepair;
+        if (CFAbsoluteTimeGetCurrent() - lastRepair > 60) {
+            lastRepair = CFAbsoluteTimeGetCurrent();
+            NSString *error = nil;
+            BOOL repaired = wq_reset_access_cache(&error);
+            wq_log(@"grant: access cache repaired automatically%@", repaired ? @"" : [@" — FAILED: " stringByAppendingString:error ?: @"?"]);
+            if (repaired) handle = wq_query(key, altFirst);
+        }
+    }
     BOOL usedAlt = altFirst;
     if (handle >= 0 && !wq_grant_opens(key)) {
         static BOOL logged;
@@ -1111,15 +1321,34 @@ BOOL wq_copy_to_local(NSString *path, NSString *dest, NSString **errorText)
     return ok;
 }
 
+// Owner, then group (primary or supplementary), then others: the first class
+// that matches decides, as in the kernel's check.
+static BOOL wq_stat_allows(const struct stat *st, mode_t need)
+{
+    uid_t me = getuid();
+    if (me == 0) return YES;
+    if (st->st_uid == me) return (st->st_mode >> 6 & need) == need;
+    BOOL member = st->st_gid == getgid();
+    if (!member) {
+        gid_t groups[64];
+        int n = getgroups(64, groups);
+        for (int i = 0; i < n && !member; i++) member = groups[i] == st->st_gid;
+    }
+    if (member) return (st->st_mode >> 3 & need) == need;
+    return (st->st_mode & need) == need;
+}
+
+BOOL wq_stat_readable(const struct stat *st)
+{
+    return wq_stat_allows(st, S_ISDIR(st->st_mode) ? 5 : 4);   // r-x / r
+}
+
 NSString *wq_permission_hint(NSString *path, BOOL forWriting)
 {
     struct stat st;
     if (lstat(path.fileSystemRepresentation, &st) != 0) return nil;
     uid_t me = getuid();
-    mode_t need = forWriting ? 2 : 4;   // w / r
-    BOOL allowed = st.st_uid == me ? (st.st_mode >> 6 & need) != 0
-                 : (st.st_gid == getgid() ? (st.st_mode >> 3 & need) != 0 : (st.st_mode & need) != 0);
-    if (allowed) return nil;
+    if (wq_stat_allows(&st, forWriting ? 2 : 4)) return nil;   // w / r
     NSString *owner = st.st_uid == 0 ? @"root" : [NSString stringWithFormat:@"uid %d", (int)st.st_uid];
     return WQLocalizedFormat(@"This file belongs to %@ (mode %o) and only its owner may %@ it. WQ Files reaches the folder, but runs as mobile (uid %d), so no app can %@ this file.",
             owner, st.st_mode & 07777, forWriting ? WQLocalized(@"change") : WQLocalized(@"read"), (int)me, forWriting ? WQLocalized(@"change") : WQLocalized(@"open"));
@@ -1195,6 +1424,10 @@ BOOL wq_backup_unit_deletable(NSString *path)
 {
     NSString *canonical = WQCanonicalVarPath(path);
     if (!WQAbsolutePathGrammar(canonical) || [canonical.lastPathComponent hasPrefix:@"."]) return NO;
+    // A unit is always a folder; a file or link with a unit-like name isn't
+    // one (review DR-07).
+    struct stat unitStat;
+    if (lstat(canonical.fileSystemRepresentation, &unitStat) != 0 || !S_ISDIR(unitStat.st_mode)) return NO;
     NSString *parentPath = canonical.stringByDeletingLastPathComponent;
     NSString *grandparentPath = parentPath.stringByDeletingLastPathComponent;
     NSString *fileRoot = WQCanonicalVarPath(wq_backup_root());
@@ -1819,6 +2052,7 @@ BOOL wq_rename_expecting(NSString *path, NSString *newName, NSDictionary<NSStrin
     wq_log(@"rename: %@ -> %@: %@", path, newName, ok ? @"OK" : changed ? @"changed since it was selected" : wq_errno(err));
     if (!ok && changed) return wq_selection_changed(errorText);
     if (!ok && errorText) *errorText = err == EEXIST ? WQLocalized(@"An item with that name already exists") : wq_errno(err);
+    errno = err;   // callers retry another name on EEXIST
     return ok;
 }
 
@@ -1929,6 +2163,73 @@ static int64_t wq_volume_max_inode(fsid_t fsid, int64_t *probeInode)
     return 0;
 }
 
+// A shared index may serve several screens/tasks. Park it only when the last
+// waiter leaves; pausing one task must not pause another task's index lookup.
+// With no demand the worker checkpoints and exits, releasing the global scan
+// gate; the next caller resumes from disk rather than holding that gate idle.
+@interface WQScanDemand : NSObject
+- (BOOL)join;
+- (void)leave;
+- (void)abandon;
+- (BOOL)wait:(WQScanCancellation *)cancellation;
+@end
+@implementation WQScanDemand {
+    NSCondition *_condition;
+    NSUInteger _waiters;
+    BOOL _abandoned, _started, _stopped;
+}
+- (instancetype)init { if ((self = [super init])) _condition = [NSCondition new]; return self; }
+- (BOOL)join
+{
+    [_condition lock];
+    BOOL joined = !_stopped;
+    if (joined) { _waiters++; _started = YES; [_condition broadcast]; }
+    [_condition unlock];
+    return joined;
+}
+- (void)leave
+{
+    [_condition lock];
+    if (_waiters) _waiters--;
+    if (!_waiters) _stopped = YES;
+    [_condition broadcast];
+    [_condition unlock];
+}
+- (void)abandon { [_condition lock]; _abandoned = YES; [_condition broadcast]; [_condition unlock]; }
+- (BOOL)wait:(WQScanCancellation *)cancellation
+{
+    [_condition lock];
+    while (!_started && !_abandoned && !cancellation.isCancelled)
+        [_condition waitUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+    BOOL proceed = _waiters > 0 && !cancellation.isCancelled;
+    [_condition unlock];
+    return proceed;
+}
+@end
+
+// The user stopped a full scan: the next one starts over (and asks first).
+static void wq_scan_checkpoint_remove(NSArray<NSString *> *bases)
+{
+    WQScanJournalRemove([@"inodes:" stringByAppendingString:[bases componentsJoinedByString:@"\n"]]);
+}
+
+static NSDictionary *wq_scan_checkpoint_load(fsid_t fsid, int64_t firstId, int64_t lastId, NSArray<NSString *> *bases)
+{
+    NSDictionary *checkpoint = WQScanJournalLoad([@"inodes:" stringByAppendingString:[bases componentsJoinedByString:@"\n"]]);
+    NSArray *seed = checkpoint[@"found"];
+    BOOL resume = [checkpoint[@"fsid"] isEqual:@[@(fsid.val[0]), @(fsid.val[1])]] &&
+        [checkpoint[@"first"] isEqual:@(firstId)] &&
+        [checkpoint[@"last"] isKindOfClass:NSNumber.class] && [checkpoint[@"next"] isKindOfClass:NSNumber.class] &&
+        [checkpoint[@"at"] isKindOfClass:NSDate.class] &&
+        -[checkpoint[@"at"] timeIntervalSinceNow] >= 0 && -[checkpoint[@"at"] timeIntervalSinceNow] < 7 * 86400 &&
+        [checkpoint[@"last"] longLongValue] <= lastId &&
+        [checkpoint[@"next"] longLongValue] >= firstId &&
+        [checkpoint[@"next"] longLongValue] <= [checkpoint[@"last"] longLongValue] + 1 &&
+        [seed isKindOfClass:NSArray.class] && seed.count == MIN(bases.count, (NSUInteger)8);
+    for (id entries in resume ? seed : @[]) if (![entries isKindOfClass:NSDictionary.class]) resume = NO;
+    return resume ? checkpoint : nil;
+}
+
 // Scans object ids first...last once and collects the direct children of every
 // base in `bases` (each a /private/var/... path), as path -> object id. Uses at
 // most 4 worker threads (half the cores) at `qos`: a full scan of a well-used
@@ -1936,13 +2237,29 @@ static int64_t wq_volume_max_inode(fsid_t fsid, int64_t *probeInode)
 // progress gets the ids done, the range size and the hits per base. Returns
 // one dictionary per base, or nil when cancelled.
 typedef void (^WQScanProgress)(int64_t done, int64_t total, const NSUInteger *counts);
+// Inode checkpoints are written at most this often (every chunk in the
+// recovery tests, which kill the process right after one).
+#ifdef WQ_ACCESS_TESTING
+static const NSTimeInterval kWQCheckpointInterval = 0;
+#else
+static const NSTimeInterval kWQCheckpointInterval = 20.0;
+#endif
 static NSArray<NSMutableDictionary<NSString *, NSNumber *> *> *wq_scan_children(fsid_t fsid, int64_t firstId, int64_t lastId,
                                                                                NSArray<NSString *> *bases,
                                                                                WQScanCancellation *cancellation,
                                                                                qos_class_t qos, BOOL allCores,
-                                                                               WQScanProgress progress)
+                                                                               WQScanProgress progress, WQScanDemand *demand)
 {
     NSUInteger baseCount = MIN(bases.count, (NSUInteger)8);
+    int64_t requestedFirst = MAX((int64_t)1, firstId);
+    NSString *journalKey = [@"inodes:" stringByAppendingString:[bases componentsJoinedByString:@"\n"]];
+    NSDictionary *checkpoint = wq_scan_checkpoint_load(fsid, requestedFirst, lastId, bases);
+    NSArray *seed = checkpoint[@"found"];
+    BOOL resume = checkpoint != nil;
+    if (resume) {
+        firstId = [checkpoint[@"next"] longLongValue];
+        wq_log(@"scan: resuming saved inode range at %lld", (long long)firstId);
+    }
     // Heap tables: blocks can't capture C arrays.
     char **prefixes = calloc(8, sizeof(char *));
     size_t *prefixLens = calloc(8, sizeof(size_t));
@@ -1952,29 +2269,82 @@ static NSArray<NSMutableDictionary<NSString *, NSNumber *> *> *wq_scan_children(
     for (NSUInteger i = 0; i < baseCount; i++) {
         prefixes[i] = strdup(bases[i].fileSystemRepresentation);
         prefixLens[i] = strlen(prefixes[i]);
-        [found addObject:[NSMutableDictionary new]];
+        NSMutableDictionary *verified = [NSMutableDictionary new];
+        for (id path in resume ? seed[i] : @{}) {
+            id inode = seed[i][path];
+            if (![inode isKindOfClass:NSNumber.class]) continue;
+            char current[1200];
+            fsid_t volume = fsid;
+            if (fsgetpath(current, sizeof(current), &volume, [inode unsignedLongLongValue]) <= 0) continue;
+            NSString *resolved = [NSString stringWithUTF8String:current];
+            if ([resolved.stringByDeletingLastPathComponent isEqual:bases[i]]) verified[resolved] = inode;
+        }
+        [found addObject:verified];
     }
     if (firstId < 1) firstId = 1;
     int64_t total = lastId >= firstId ? lastId - firstId + 1 : 0;
     NSLock *lock = [NSLock new];
     const int64_t chunk = 32768;
     int64_t chunks = (total + chunk - 1) / chunk;
-    __block int64_t nextChunk = 0, done = 0;
+    __block int64_t nextChunk = 0, done = 0, frontier = 0;
+    NSMutableIndexSet *completed = [NSMutableIndexSet new];
+    // Save out-of-order ranges too: a slow early chunk must not force later,
+    // already committed chunks to run again after a restart.
+    for (id range in resume && [checkpoint[@"ranges"] isKindOfClass:NSArray.class] ? checkpoint[@"ranges"] : @[]) {
+        if (![range isKindOfClass:NSArray.class] || [range count] != 2 ||
+            ![range[0] isKindOfClass:NSNumber.class] || ![range[1] isKindOfClass:NSNumber.class]) continue;
+        int64_t start = [range[0] longLongValue], end = [range[1] longLongValue];
+        if (start >= firstId && end >= start && end <= [checkpoint[@"last"] longLongValue])
+            [completed addIndexesInRange:NSMakeRange((NSUInteger)start, (NSUInteger)(end - start + 1))];
+    }
+    done = (int64_t)completed.count;
+    // Checkpoints: a snapshot is taken under `lock` (cheap copies), written
+    // outside it every 20 s, and never older over newer. Writing the whole
+    // found set every second stalled every worker and wrote hundreds of MB
+    // over a long scan (iOS kills apps for heavy disk writes).
+    __block NSTimeInterval savedAt = NSDate.date.timeIntervalSinceReferenceDate;
+    __block uint64_t snapshotSeq = 0, writtenSeq = 0;
+    NSLock *writeLock = [NSLock new];
+    NSDictionary *(^snapshotCheckpoint)(void) = ^NSDictionary *{   // caller holds lock
+        NSMutableArray *ranges = [NSMutableArray new];
+        [completed enumerateRangesUsingBlock:^(NSRange range, BOOL *__unused stop) {
+            [ranges addObject:@[@(range.location), @(NSMaxRange(range) - 1)]];
+        }];
+        NSMutableArray *foundCopy = [NSMutableArray arrayWithCapacity:found.count];
+        for (NSDictionary *hits in found) [foundCopy addObject:[hits copy]];
+        snapshotSeq++;
+        return @{@"seq": @(snapshotSeq), @"state": @{@"fsid": @[@(fsid.val[0]), @(fsid.val[1])], @"first": @(requestedFirst),
+            @"last": @(lastId), @"next": @(MIN(firstId + frontier * chunk, lastId + 1)),
+            @"found": foundCopy, @"ranges": ranges, @"at": NSDate.date}};
+    };
+    void (^writeCheckpoint)(NSDictionary *) = ^(NSDictionary *snapshot) {
+        uint64_t seq = [snapshot[@"seq"] unsignedLongLongValue];
+        [writeLock lock];
+        if (seq > writtenSeq) {
+            if (!WQScanJournalSave(journalKey, snapshot[@"state"])) wq_log(@"scan: checkpoint write failed; continuing in memory");
+            writtenSeq = seq;
+        }
+        [writeLock unlock];
+    };
     NSUInteger cores = NSProcessInfo.processInfo.activeProcessorCount;
     // A full scan the user agreed to wait for uses all but two cores; the
     // short incremental scans stay at half the cores.
     size_t workers = allCores ? (size_t)MAX((NSUInteger)2, MIN((NSUInteger)8, cores > 2 ? cores - 2 : 1))
                               : (size_t)MAX((NSUInteger)1, MIN((NSUInteger)4, cores / 2));
+    __block _Atomic BOOL abandoned = NO;
     dispatch_apply(workers, dispatch_get_global_queue(qos, 0), ^(size_t __unused w) {
         fsid_t id = fsid;
         char buf[1200];
         for (;;) {
-            if (cancellation.isCancelled) return;
+            if (!wq_scan_wait(cancellation)) return;
+            if (demand && ![demand wait:cancellation]) { atomic_store(&abandoned, YES); return; }
             [lock lock];
             int64_t c = nextChunk++;
-            [lock unlock];
-            if (c >= chunks) return;
+            if (c >= chunks) { [lock unlock]; return; }
             int64_t first = firstId + c * chunk, last = MIN(first + chunk - 1, lastId);
+            BOOL alreadyDone = c < frontier || [completed containsIndexesInRange:NSMakeRange((NSUInteger)first, (NSUInteger)(last - first + 1))];
+            [lock unlock];
+            if (alreadyDone) continue;
             NSMutableDictionary *local[8] = {nil};
             for (int64_t ino = first; ino <= last; ino++) {
                 if ((ino & 127) == 0 && cancellation.isCancelled) return;
@@ -1996,17 +2366,40 @@ static NSArray<NSMutableDictionary<NSString *, NSNumber *> *> *wq_scan_children(
                 if (local[i]) [found[i] addEntriesFromDictionary:local[i]];
                 snapshot[i] = counts[i] = found[i].count;
             }
-            done += last - first + 1;
-            int64_t nowDone = done;
+            NSRange finishedRange = NSMakeRange((NSUInteger)first, (NSUInteger)(last - first + 1));
+            done += last - first + 1 - (int64_t)[completed countOfIndexesInRange:finishedRange];
+            [completed addIndexesInRange:finishedRange];
+            while (frontier < chunks) {
+                int64_t start = firstId + frontier * chunk, end = MIN(start + chunk - 1, lastId);
+                NSRange prefix = NSMakeRange((NSUInteger)start, (NSUInteger)(end - start + 1));
+                if (![completed containsIndexesInRange:prefix]) break;
+                [completed removeIndexesInRange:prefix];
+                frontier++;
+            }
+            NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
+            NSDictionary *checkpointState = nil;
+            if (now - savedAt >= kWQCheckpointInterval) { checkpointState = snapshotCheckpoint(); savedAt = now; }
+            int64_t nowDone = done + firstId - requestedFirst;
             [lock unlock];
-            if (progress && !cancellation.isCancelled) progress(nowDone, total, snapshot);
+            if (checkpointState) writeCheckpoint(checkpointState);
+            if (progress && !cancellation.isCancelled) progress(nowDone, lastId - requestedFirst + 1, snapshot);
         }
     });
     for (NSUInteger i = 0; i < baseCount; i++) free(prefixes[i]);
     free(prefixes);
     free(prefixLens);
     free(counts);
-    if (cancellation.isCancelled) return nil;
+    // Interrupted: save both the contiguous frontier and completed ranges
+    // beyond a hole. Finished: the checkpoint has done its job; a kept one
+    // would turn the next forced full scan into a silent resume.
+    if (cancellation.isCancelled || atomic_load(&abandoned)) {
+        [lock lock];
+        NSDictionary *snapshot = snapshotCheckpoint();
+        [lock unlock];
+        writeCheckpoint(snapshot);
+        return nil;
+    }
+    WQScanJournalRemove(journalKey);
     return found;
 }
 
@@ -2300,8 +2693,8 @@ static BOOL wq_fsgetpath_sees_others(fsid_t fsid, int64_t maxInode, double *idsP
     NSString *bundle = wq_norm(NSBundle.mainBundle.bundlePath.stringByDeletingLastPathComponent);
     if (bundle.length) [own addObject:bundle];
     NSString *group = wq_app_group();
-    NSURL *groupURL = group ? [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:group] : nil;
-    if (groupURL.path.length) [own addObject:wq_norm(groupURL.path)];
+    NSString *groupRoot = wq_group_root(group);
+    if (groupRoot.length) [own addObject:wq_norm(groupRoot)];
     int64_t stride = MAX((int64_t)1, maxInode / 20000);
     NSUInteger sampled = 0, resolved = 0, foreign = 0;
     NSCountedSet<NSString *> *areas = [NSCountedSet new];
@@ -2395,7 +2788,7 @@ static void wq_full_scan_release(void)
 // Asks before a full scan. Returns the scan's stop token, or nil when the user
 // (or the missing UI) declined. A non-nil token holds the full-scan gate until
 // wq_full_scan_end.
-static WQScanCancellation *wq_full_scan_begin(NSString *what, int64_t ids, double seconds, WQScanCancellation *caller)
+static WQScanCancellation *wq_full_scan_begin(NSString *what, int64_t ids, double seconds, WQScanCancellation *caller, BOOL resuming)
 {
     // Without an App Group no container can be opened or named, so a long
     // scan would only produce a list of unusable folders.
@@ -2405,6 +2798,9 @@ static WQScanCancellation *wq_full_scan_begin(NSString *what, int64_t ids, doubl
         return nil;
     }
     if (!wq_full_scan_acquire(what, caller)) return nil;
+    // A resumed scan asks too: the confirmation also opens the scan window,
+    // the only place to Stop it.
+    if (resuming) wq_log(@"scan: a saved full scan of %@ can be resumed", what);
     if (!gFullScanConfirm || !gFullScanConfirm(what, ids, seconds)) {
         atomic_store(&gFullScanDeclined, YES);
         wq_log(@"scan: full scan of %@ not started (%lld ids, about %.0f s)", what, (long long)ids, seconds);
@@ -2454,7 +2850,7 @@ static BOOL wq_is_ls_store_name(const char *path)
 // its id is among the newest: scan down from the top and stop at the first.
 static const CFTimeInterval kWQStoreSearchLimit = 20;
 
-static NSString *wq_scan_for_ls_store(fsid_t fsid, int64_t maxInode, qos_class_t qos, WQScanProgress progress)
+static NSString *wq_scan_for_ls_store(fsid_t fsid, int64_t maxInode, qos_class_t qos, WQScanProgress progress, WQScanDemand *demand)
 {
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     const int64_t chunk = 32768;
@@ -2470,7 +2866,7 @@ static NSString *wq_scan_for_ls_store(fsid_t fsid, int64_t maxInode, qos_class_t
         char buf[1200];
         NSUInteger none[8] = {0};
         for (;;) {
-            if (stop.isCancelled) return;
+            if (!wq_scan_wait(stop) || (demand && ![demand wait:stop])) return;
             [lock lock];
             int64_t c = nextChunk++;
             [lock unlock];
@@ -2517,7 +2913,7 @@ static void wq_discover_ls_store_in_background(fsid_t fsid)
             if (gContainerListProvider(nil).count >= 2) return;   // remembered and readable
             int64_t probeInode = 0;
             int64_t maxInode = wq_volume_max_inode(fsid, &probeInode);
-            NSString *store = maxInode > 0 ? wq_scan_for_ls_store(fsid, maxInode, QOS_CLASS_UTILITY, nil) : nil;
+            NSString *store = maxInode > 0 ? wq_scan_for_ls_store(fsid, maxInode, QOS_CLASS_UTILITY, nil, nil) : nil;
             NSUInteger listed = store ? gContainerListProvider(store).count : 0;
             if (listed < 2) {
                 [NSUserDefaults.standardUserDefaults setObject:NSDate.date forKey:kWQStoreDiscoveryMissKey];
@@ -2547,7 +2943,7 @@ static NSArray<NSString *> *wq_existing_containers(NSArray<NSString *> *paths, N
 
 // The App Data and Extensions lists from the LaunchServices database.
 static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_store(NSArray<NSString *> *roots, fsid_t fsid,
-                                                                                   qos_class_t qos, WQScanProgress progress)
+                                                                                   qos_class_t qos, WQScanProgress progress, WQScanDemand *demand)
 {
     if (!gContainerListProvider) return nil;
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
@@ -2557,7 +2953,7 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_st
         int64_t probeInode = 0;
         int64_t maxInode = wq_volume_max_inode(fsid, &probeInode);
         if (maxInode <= 0) return nil;
-        NSString *store = wq_scan_for_ls_store(fsid, maxInode, qos, progress);
+        NSString *store = wq_scan_for_ls_store(fsid, maxInode, qos, progress, demand);
         if (!store) {
             wq_log(@"scan: no LaunchServices database found by id (%.1f s)", CFAbsoluteTimeGetCurrent() - started);
             return nil;
@@ -2588,8 +2984,9 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_containers_from_ls_st
 
 // inodeOnly: skip the container manager and LaunchServices shortcuts and scan
 // ids (iOS 26 Internal Daemons, which no database lists).
-static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_t fsid, qos_class_t qos, BOOL inodeOnly)
+static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_t fsid, qos_class_t qos, BOOL inodeOnly, WQScanDemand *demand)
 {
+    if (demand && ![demand wait:nil]) return nil;
     NSArray<NSString *> *roots = wq_shared_scan_roots();
     atomic_store(&gFullScanDeclined, NO);
     if (inodeOnly) goto inodeScan;
@@ -2621,11 +3018,12 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *wq_run_shared_scan(fsid_
             @synchronized (gSharedScanGuard) { progress = gScanProgress; }
             if (progress) progress(done, total, 0);
         };
-        NSDictionary *fromStore = wq_containers_from_ls_store(roots, fsid, qos, report);
+        NSDictionary *fromStore = wq_containers_from_ls_store(roots, fsid, qos, report, demand);
         if (fromStore) return fromStore;
     }
     }
 inodeScan:;
+    if (demand && ![demand wait:nil]) return nil;
     int64_t probeInode = 0;
     int64_t maxInode = wq_volume_max_inode(fsid, &probeInode);
     if (maxInode <= 0) {
@@ -2668,8 +3066,9 @@ inodeScan:;
     WQScanCancellation *stop = nil;
     if (!cache) {
         stop = wq_full_scan_begin(inodeOnly ? WQLocalized(@"Internal Daemons") : WQLocalized(@"the app folders"), maxInode,
-                                  wq_full_scan_estimate(maxInode, sampleRate), nil);
-        if (!stop) return nil;
+                                  wq_full_scan_estimate(maxInode, sampleRate), nil,
+                                  wq_scan_checkpoint_load(fsid, firstId, maxInode, roots) != nil);
+        if (!stop) return nil;   // declined: progress kept, the next attempt asks again
         qos = QOS_CLASS_USER_INITIATED;
     }
     CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
@@ -2680,7 +3079,8 @@ inodeScan:;
         if (progress) progress(done, total, (index < roots.count ? known[index].count : 0) + (index < 8 ? counts[index] : 0));
         if (stop && gFullScanProgress) gFullScanProgress(done, total, NO);
     };
-    NSArray *lists = wq_scan_children(fsid, firstId, maxInode, roots, stop, qos, stop != nil, report);
+    NSArray *lists = wq_scan_children(fsid, firstId, maxInode, roots, stop, qos, stop != nil, report, demand);
+    if (stop && stop.isCancelled) wq_scan_checkpoint_remove(roots);   // Stop: start over next time, and only when asked
     if (stop) wq_full_scan_end(stop);
     if (!lists) return nil;
     NSMutableDictionary *saved = [NSMutableDictionary new];
@@ -2711,6 +3111,7 @@ inodeScan:;
 // after an invalidation start a new worker, which first waits for the
 // detached one (previous) so the two never scan at the same time.
 @interface WQScanSlot : NSObject
+@property (nonatomic, strong) WQScanDemand *demand;
 @property (nonatomic, copy) NSDictionary<NSString *, NSArray<NSString *> *> *scan;
 @property (nonatomic) NSTimeInterval at;
 @property (nonatomic, strong) dispatch_group_t group;
@@ -2740,6 +3141,7 @@ static void wq_scan_slots_clear(void)
         // callers or fills the slot.
         if (slot.group) {
             slot.previous = slot.group;
+            [slot.demand abandon];
             slot.group = nil;
             slot.box = nil;
         }
@@ -2758,6 +3160,7 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
     id owner = [NSObject new];
     dispatch_group_t group = nil;
     NSMutableDictionary *box = nil;
+    WQScanDemand *demand = nil;
     @synchronized (gSharedScanGuard) {
         if (slot.scan && NSDate.date.timeIntervalSinceReferenceDate - slot.at < kWQSharedScanTTL) {
             NSArray *cached = slot.scan[base];
@@ -2769,17 +3172,28 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
             gScanProgressIndex = baseIndex;
             gScanProgressOwner = owner;
         }
-        if (!slot.group) {
+        BOOL joined = slot.group && [slot.demand join];
+        if (!joined) {
             // A screen waiting for the result gets foreground priority; the
             // worker count stays at half the cores either way.
             qos_class_t qos = progress ? QOS_CLASS_USER_INITIATED : QOS_CLASS_UTILITY;
             dispatch_group_t started = dispatch_group_create();
             NSMutableDictionary *startedBox = [NSMutableDictionary new];
+            if (slot.group) {
+                // A paused worker is still winding down. Its eventual result
+                // must not overwrite the replacement worker's cache.
+                slot.generation++;
+                slot.scan = nil;
+                slot.at = 0;
+            }
             NSUInteger generation = slot.generation;
-            dispatch_group_t previous = slot.previous;
+            dispatch_group_t previous = slot.group ?: slot.previous;
             slot.previous = nil;
             slot.group = started;
             slot.box = startedBox;
+            slot.demand = [WQScanDemand new];
+            [slot.demand join];
+            WQScanDemand *workerDemand = slot.demand;
             dispatch_group_enter(started);
             dispatch_async(dispatch_get_global_queue(qos, 0), ^{
                 // A worker detached by an invalidation finishes first.
@@ -2790,7 +3204,7 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
                     if (wq_test_shared_scan_runner) scan = wq_test_shared_scan_runner(inodeOnly);
                     else
 #endif
-                    scan = wq_run_shared_scan(fsid, qos, inodeOnly);
+                    scan = wq_run_shared_scan(fsid, qos, inodeOnly, workerDemand);
                 } @catch (NSException *exception) {
                     wq_log(@"scan: exception %@", exception.reason);
                 }
@@ -2814,11 +3228,13 @@ static NSArray<NSString *> *wq_shared_children(NSString *base, fsid_t fsid, WQSc
         }
         group = slot.group;
         box = slot.box;
+        demand = slot.demand;
     }
     BOOL cancelled = NO;
     while (dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC)) != 0) {
         if (cancellation.isCancelled) { cancelled = YES; break; }
     }
+    [demand leave];
     NSArray<NSString *> *result = nil;
     @synchronized (gSharedScanGuard) {
         if (gScanProgressOwner == owner) { gScanProgress = nil; gScanProgressOwner = nil; }
@@ -2888,8 +3304,9 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
     }
     WQScanCancellation *stop = nil;
     if (dynamicBound) {
-        stop = wq_full_scan_begin(base.lastPathComponent, maxInode, wq_full_scan_estimate(maxInode, 0), cancellation);
-        if (!stop) return nil;
+        stop = wq_full_scan_begin(base.lastPathComponent, maxInode, wq_full_scan_estimate(maxInode, 0), cancellation,
+                                  wq_scan_checkpoint_load(fsid, 1, maxInode, @[base]) != nil);
+        if (!stop) return nil;   // declined: progress kept, the next attempt asks again
     }
     // Either the caller's cancellation or the scan window's Stop ends it.
     WQScanCancellation *either = stop ?: cancellation;
@@ -2906,7 +3323,8 @@ NSArray<NSString *> *wq_enumerate(NSString *dir, int64_t maxInode, WQScanCancell
         ^(int64_t done, int64_t total, const NSUInteger *counts) {
             if (progress) progress(done, total, counts[0]);
             if (stop && gFullScanProgress) gFullScanProgress(done, total, NO);
-        });
+        }, nil);
+    if (stop && stop.isCancelled) wq_scan_checkpoint_remove(@[base]);
     if (stop) { wq_full_scan_end(stop); [either cancel]; }
     if (!lists) return nil;
     if (dynamicBound) wq_check_scan_completion(fsid, probeInode, dir);
@@ -2966,6 +3384,132 @@ WQMeasureResult wq_measure_tree(NSString *dir, WQScanCancellation *cancellation,
     }
     if (cancellation.isCancelled) return WQMeasureResultCancelled;
     if (bytes) *bytes = total;
+    return limited ? WQMeasureResultLimited : WQMeasureResultKnown;
+}
+
+static NSArray *wq_measure_identity(const struct stat *st)
+{
+    return @[@(st->st_dev), @(st->st_ino), @(st->st_birthtimespec.tv_sec), @(st->st_birthtimespec.tv_nsec)];
+}
+
+// Measurement progress is saved at most this often (the recovery tests save
+// after every directory to cover a kill right after the first one).
+// One trip to the mutation queue measures directories for up to this long
+// (one directory per trip in the tests), so writes can still run in between
+// without a queue hop for every directory.
+#ifdef WQ_ACCESS_TESTING
+static const NSTimeInterval kWQMeasureSaveInterval = 0;
+static const NSTimeInterval kWQMeasureSlice = 0;
+#else
+static const NSTimeInterval kWQMeasureSaveInterval = 20.0;
+static const NSTimeInterval kWQMeasureSlice = 0.05;
+#endif
+
+WQMeasureResult wq_measure_tree_resumable(NSString *dir, NSString *scope, NSString *taskID,
+    WQScanCancellation *cancellation, unsigned long long *bytes, void (^performIO)(void (^work)(void)))
+{
+    if (cancellation.isCancelled) return WQMeasureResultCancelled;
+    __block struct stat rootStat = {0};
+    __block BOOL rootOK = NO;
+    performIO(^{ rootOK = wq_stat(dir, &rootStat) && S_ISDIR(rootStat.st_mode); });
+    if (!rootOK) return wq_measure_tree(dir, cancellation, bytes);
+    NSArray *identity = wq_measure_identity(&rootStat);
+    NSString *key = [NSString stringWithFormat:@"measure:%@:%@", scope, dir];
+    NSDictionary *saved = WQScanJournalLoad(key);
+    NSArray *pendingSaved = saved[@"pending"];
+    BOOL valid = [saved[@"task"] isEqual:taskID] && [saved[@"identity"] isEqual:identity] &&
+        [pendingSaved isKindOfClass:NSArray.class] && [saved[@"bytes"] isKindOfClass:NSNumber.class] &&
+        [saved[@"bytes"] longLongValue] >= 0 && [saved[@"limited"] isKindOfClass:NSNumber.class];
+    NSString *prefix = [dir stringByAppendingString:@"/"];
+    for (id path in valid ? pendingSaved : @[]) {
+        if (![path isKindOfClass:NSString.class] || ![path isEqual:[path stringByStandardizingPath]] ||
+            (![path isEqual:dir] && ![path hasPrefix:prefix])) valid = NO;
+    }
+    NSMutableArray *pending = valid ? [pendingSaved mutableCopy] : [NSMutableArray arrayWithObject:dir];
+    __block unsigned long long total = valid ? [saved[@"bytes"] unsignedLongLongValue] : 0;
+    __block BOOL limited = valid && [saved[@"limited"] boolValue];
+    if (valid) wq_log(@"measure: resuming %@ (%lu directories remaining)", dir.lastPathComponent, (unsigned long)pending.count);
+    // Small directories finish before the first save; a finished measurement
+    // removes its journal.
+    NSTimeInterval lastSave = NSDate.date.timeIntervalSinceReferenceDate;
+    // Sandbox tokens are asked for sparingly: a token for the measured folder
+    // covers its subfolders, so a denied subfolder gets at most a few tries per
+    // measurement (a failed query isn't remembered by wq_grant and costs two
+    // round trips under the global grant lock). EACCES is file permissions,
+    // which no token changes.
+    __block NSUInteger grantTries = 0;
+    __block NSUInteger skipped = 0;
+    __block NSString *firstLimit = nil;
+    void (^noteLimit)(NSString *, int) = ^(NSString *what, int err) {
+        limited = YES;
+        if (!firstLimit) firstLimit = [NSString stringWithFormat:@"%@ (%@)", what, wq_errno(err)];
+    };
+    while (pending.count) {
+        if (!wq_scan_wait(cancellation)) return WQMeasureResultCancelled;
+        // A slice of directories per trip to the mutation queue. Never hold a
+        // descriptor or a sandbox token across a saved checkpoint.
+        performIO(^{
+            CFAbsoluteTime sliceStart = CFAbsoluteTimeGetCurrent();
+            do {
+                if (cancellation.isCancelled) return;
+                NSString *path = pending.lastObject;
+                [pending removeLastObject];
+                // Opened directly: the children come from this walk (lstat
+                // types), so a component can only be a link after a swap, and
+                // measuring never writes. Walking every path from "/" again
+                // cost about ten opens per directory.
+                BOOL isRoot = [path isEqualToString:dir];
+                int fd = open(path.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (fd < 0 && (isRoot ? wq_is_denied(errno) : errno == EPERM && grantTries < 3)) {
+                    int denied = errno;
+                    if (!isRoot) grantTries++;
+                    if (wq_grant(path)) fd = open(path.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                    else errno = denied;
+                }
+                // A subfolder removed since it was listed (crash logs and
+                // caches change while they are measured) was simply not there.
+                if (fd < 0 && !isRoot && (errno == ENOENT || errno == ENOTDIR)) { skipped++; continue; }
+                int openErr = errno;
+                DIR *stream = fd >= 0 ? fdopendir(fd) : NULL;
+                if (!stream) { if (fd >= 0) { openErr = errno; close(fd); } noteLimit(path, openErr); continue; }
+                struct dirent *entry;
+                errno = 0;
+                while ((entry = readdir(stream))) {
+                    if (cancellation.isCancelled) break;
+                    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+                    if (entry->d_type == DT_LNK) continue;
+                    struct stat st;
+                    if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+                        int err = errno;
+                        if (err == ENOENT) skipped++;   // removed since it was listed
+                        else noteLimit([path stringByAppendingPathComponent:@(entry->d_name)], err);
+                        errno = 0;
+                        continue;
+                    }
+                    if (S_ISREG(st.st_mode)) total += (unsigned long long)MAX((off_t)0, st.st_size);
+                    else if (S_ISDIR(st.st_mode)) {
+                        NSString *name = [NSFileManager.defaultManager stringWithFileSystemRepresentation:entry->d_name length:strlen(entry->d_name)];
+                        if (name) [pending addObject:[path stringByAppendingPathComponent:name]];
+                    }
+                    errno = 0;
+                }
+                if (errno) noteLimit(path, errno);
+                closedir(stream);
+            } while (pending.count && CFAbsoluteTimeGetCurrent() - sliceStart < kWQMeasureSlice);
+        });
+        if (cancellation.isCancelled) return WQMeasureResultCancelled;
+        NSTimeInterval now = NSDate.date.timeIntervalSinceReferenceDate;
+        if (pending.count && now - lastSave >= kWQMeasureSaveInterval) {
+            if (!WQScanJournalSave(key, @{@"task": taskID, @"identity": identity, @"pending": pending,
+                                         @"bytes": @(total), @"limited": @(limited)}))
+                wq_log(@"measure: cannot save progress for %@", dir.lastPathComponent);
+            lastSave = now;
+        }
+    }
+    WQScanJournalRemove(key);
+    if (bytes) *bytes = total;
+    if (firstLimit) wq_log(@"measure: %@ limited, first at %@", dir.lastPathComponent, firstLimit);
+    if (skipped) wq_log(@"measure: %@: %lu entries removed while measuring", dir.lastPathComponent, (unsigned long)skipped);
     return limited ? WQMeasureResultLimited : WQMeasureResultKnown;
 }
 
@@ -3363,6 +3907,12 @@ static NSString *wq_container_identifier_lookup(NSString *key, WQLabelIdentity s
 }
 
 static NSString *(*gContainerLabelResolver)(NSString *path);
+static NSString *(*gGroupLabelResolver)(NSString *path);
+
+void wq_set_group_label_resolver(NSString *(*resolver)(NSString *path))
+{
+    gGroupLabelResolver = resolver;
+}
 
 void wq_set_container_label_resolver(NSString *(*resolver)(NSString *path))
 {
@@ -3384,6 +3934,11 @@ NSString *wq_container_label(NSString *dir)
             buf[len] = 0;
             return [NSString stringWithUTF8String:buf];
         }
+        // iOS 27.2+: the identity attribute ("identifier: <id>" among others).
+        char identity[2048];
+        ssize_t n = getxattr(dir.fileSystemRepresentation, "com.apple.containermanager.identity", identity, sizeof(identity), 0, 0);
+        NSString *fromIdentity = n > 0 ? WQIdentityAttributeIdentifier([NSData dataWithBytes:identity length:(NSUInteger)n]) : nil;
+        if (fromIdentity.length) return fromIdentity;
     }
     // Prefer the container-manager query over the metadata plist: it needs no
     // file permission and can also label containers whose plist is root-only.
@@ -3412,11 +3967,31 @@ NSString *wq_container_label(NSString *dir)
     if (resolved.length) return resolved;
     // The metadata plist is usually root-only (mode 600); only try it when the
     // owner and mode let this app read it, so the Log isn't flooded.
+    NSString *fromPlist = nil;
     NSString *meta = [dir stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"];
-    if (wq_permission_hint(meta, NO)) return nil;
-    NSData *data = wq_read(meta, 256 * 1024, NULL);
-    if (!data) return nil;
-    NSDictionary *plist = [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:nil];
-    id ident = [plist isKindOfClass:NSDictionary.class] ? plist[@"MCMMetadataIdentifier"] : nil;
-    return [ident isKindOfClass:NSString.class] ? ident : nil;
+    if (!wq_permission_hint(meta, NO)) {
+        NSData *data = wq_read(meta, 256 * 1024, NULL);
+        NSDictionary *plist = data ? [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:nil] : nil;
+        id ident = [plist isKindOfClass:NSDictionary.class] ? plist[@"MCMMetadataIdentifier"] : nil;
+        if ([ident isKindOfClass:NSString.class] && [ident length]) fromPlist = ident;
+    }
+    // App Groups whose plist is root-only (issue #59): the group id the apps'
+    // records in the LaunchServices database give this folder. The plist
+    // wins when both exist; a disagreement is logged once.
+    NSString *fromGroups = gGroupLabelResolver ? gGroupLabelResolver(WQCanonicalVarPath(dir)) : nil;
+    if (fromPlist) {
+        if (fromGroups.length && ![fromGroups isEqualToString:fromPlist]) {
+            static NSMutableSet<NSString *> *reported;
+            BOOL first = NO;
+            @synchronized (NSNull.null) {
+                if (!reported) reported = [NSMutableSet new];
+                first = ![reported containsObject:dir];
+                [reported addObject:dir];
+            }
+            if (first) wq_log(@"label: app records give %@ for %@, its metadata says %@; using the metadata",
+                              fromGroups, dir.lastPathComponent, fromPlist);
+        }
+        return fromPlist;
+    }
+    return fromGroups.length ? fromGroups : nil;
 }

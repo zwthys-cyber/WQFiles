@@ -27,4 +27,14 @@ BOOL wq_sqlite_save(sqlite3 *copyDB, NSString *original, NSDictionary *state,
                     NSDictionary *_Nullable *_Nullable newState, NSString *_Nullable *_Nullable backupUnit,
                     NSString *_Nullable *_Nullable error);
 
+// After `backup` (a file from Backups) was written back to `original`: if it
+// is an SQLite database, the live -wal/-shm beside `original` still belong to
+// the newer database and SQLite would reopen that (review DR-02). Each one
+// that isn't empty is replaced by the backup's own sidecar (backup + "-wal")
+// or else emptied, with the old bytes kept in Backups (their units are added
+// to `units`). NO with *error when a sidecar can't be handled; nothing is done
+// for files that aren't SQLite databases.
+BOOL wq_sqlite_restore_sidecars(NSString *original, NSString *backup, NSMutableArray<NSString *> *_Nullable units,
+                                NSString *_Nullable *_Nullable error);
+
 NS_ASSUME_NONNULL_END

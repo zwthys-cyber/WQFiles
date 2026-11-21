@@ -21,6 +21,105 @@
       "category": "utilities",
       "versions": [
         {
+          "version": "0.9.19",
+          "buildVersion": "113",
+          "date": "2026-11-20",
+          "size": 2182170,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.19/WQFiles.ipa",
+          "localizedDescription": "Optional App Store icons for other apps (Settings → App Store Icons), fixes apps with one-word bundle ids (like Pinterest) and the empty gap above the Apps list on iOS 27, and keeps the Backups tab working on iOS 27 beta 5.",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.18",
+          "buildVersion": "106",
+          "date": "2026-11-17",
+          "size": 2171189,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.18/WQFiles.ipa",
+          "localizedDescription": "Custom inspectors (read-only JavaScript, install from a .zip), your own folders and files in the Cache Cleaner, and Japanese.",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.17",
+          "buildVersion": "105",
+          "date": "2026-11-17",
+          "size": 2089006,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.17/WQFiles.ipa",
+          "localizedDescription": "Fixes LiveContainer setups where every folder was refused, SQLite restore with -wal files, lossless SQLite and plist edits, and backups listed newest first.",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.16",
+          "buildVersion": "101",
+          "date": "2026-11-16",
+          "size": 2078252,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.16/WQFiles.ipa",
+          "localizedDescription": "Works inside LiveContainer again. Cache Cleaner: Clean is ready after a scan, plus Invert Selection. Wi-Fi uploads stop with sharing.",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.15",
+          "buildVersion": "100",
+          "date": "2026-11-16",
+          "size": 2076710,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.15/WQFiles.ipa",
+          "localizedDescription": "Recognizes iOS 27.3 beta 2+, where Apple patched worse_query. The access cache repairs itself when another app in the App Group broke it.",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.14",
+          "buildVersion": "99",
+          "date": "2026-11-16",
+          "size": 2071017,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.14/WQFiles.ipa",
+          "localizedDescription": "Show Folder Sizes, empty folder hints, Colored Cards with a pickable color, themed tiles; WQ Files is back in the Files app; fixes wrong app names on iOS 26.5 and the Crash Logs note.",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.13",
+          "buildVersion": "96",
+          "date": "2026-11-16",
+          "size": 2053060,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.13/WQFiles.ipa",
+          "localizedDescription": "Apps and Cache Cleaner scans are fast again (more than twice as fast as 0.9.11 and 0.9.12).",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.12",
+          "buildVersion": "94",
+          "date": "2026-11-16",
+          "size": 2053202,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.12/WQFiles.ipa",
+          "localizedDescription": "Wi-Fi Sharing: browse, download and upload files from any browser on the same Wi-Fi. Themes with importable .wqtheme files, Recent folders and files, progress bars, and a fix for a frozen screen.",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.11",
+          "buildVersion": "92",
+          "date": "2026-11-15",
+          "size": 1969224,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.11/WQFiles.ipa",
+          "localizedDescription": "Vietnamese translation. Apps and Clean scans keep running across tabs and app restarts, with Pause/Resume and a spinner or clock in the tab bar.",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.10",
+          "buildVersion": "90",
+          "date": "2026-11-15",
+          "size": 1918805,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.10/WQFiles.ipa",
+          "localizedDescription": "Fixes installed apps missing from Apps, App Data and Extension Data (e.g. on iOS 26.5).",
+          "minOSVersion": "26.0"
+        },
+        {
+          "version": "0.9.9",
+          "buildVersion": "89",
+          "date": "2026-11-15",
+          "size": 1918433,
+          "downloadURL": "https://github.com/kolbicz/WQFiles/releases/download/v0.9.9/WQFiles.ipa",
+          "localizedDescription": "App Groups now show their names on iOS 27.2+. Plain Background option, dark and tinted app icon, files you can't open are dimmed, and a clear notice on iOS 18 and older.",
+          "minOSVersion": "26.0"
+        },
+        {
           "version": "0.9.8",
           "buildVersion": "88",
           "date": "2026-11-14",
