@@ -143,6 +143,21 @@ NSArray<WQInspector *> *wq_inspectors_in(NSString *folder, NSArray<NSString *> *
     return found;
 }
 
+
+NSArray<WQInspector *> *wq_available_inspectors(NSString *folder, NSString *bundledFolder, NSArray<NSString *> **problems)
+{
+    NSArray<NSString *> *userProblems = nil, *bundledProblems = nil;
+    NSArray<WQInspector *> *installed = wq_inspectors_in(folder, &userProblems);
+    NSArray<WQInspector *> *bundled = bundledFolder.length ? wq_inspectors_in(bundledFolder, &bundledProblems) : @[];
+    NSMutableDictionary<NSString *, WQInspector *> *byName = [NSMutableDictionary new];
+    for (WQInspector *inspector in bundled) byName[inspector.name] = inspector;
+    for (WQInspector *inspector in installed) byName[inspector.name] = inspector;
+    if (problems) *problems = [(userProblems ?: @[]) arrayByAddingObjectsFromArray:bundledProblems ?: @[]];
+    return [byName.allValues sortedArrayUsingComparator:^NSComparisonResult(WQInspector *a, WQInspector *b) {
+        return [a.name localizedStandardCompare:b.name];
+    }];
+}
+
 #pragma mark - Installing
 
 static BOOL wq_inspector_has_manifest(NSString *dir)

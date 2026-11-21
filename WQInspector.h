@@ -4,7 +4,7 @@
 //
 //  Custom inspectors (#45): small read-only JavaScript programs the user
 //  installs in Documents/Inspectors (visible in the Files app). WQ Files
-//  ships only the runtime and a generic table; no app-specific scripts.
+//  also supports read-only inspectors bundled by this fork.
 //
 //  One folder per inspector:
 //
@@ -82,6 +82,8 @@ NSString *wq_inspectors_folder(void);
 // The inspectors in `folder` (one subfolder each), sorted by name.
 // *problems gets one line per folder that was skipped and why.
 NSArray<WQInspector *> *wq_inspectors_in(NSString *folder, NSArray<NSString *> *_Nullable *_Nullable problems);
+// Installed scripts take precedence by name; bundled scripts are never copied or modified.
+NSArray<WQInspector *> *wq_available_inspectors(NSString *folder, NSString *_Nullable bundledFolder, NSArray<NSString *> *_Nullable *_Nullable problems);
 
 // Reads one inspector folder; nil with *error when it isn't valid.
 WQInspector *_Nullable wq_inspector_load(NSString *folder, NSString *_Nullable *_Nullable error);

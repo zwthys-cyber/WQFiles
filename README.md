@@ -216,7 +216,7 @@ for again after a week. Turning the setting off deletes the downloaded icons.
 ## Custom inspectors
 
 Small JavaScript programs that show a file's contents your way ([#45](https://github.com/kolbicz/WQFiles/issues/45)).
-WQ Files ships only the runtime; the inspectors are yours. Long-press a file →
+This fork includes a read-only Douyin push-cache inspector; additional inspectors can be installed. Long-press a file →
 **Open As → Custom Inspector…**. When one inspector matches the file's
 extension it opens directly, otherwise you pick one.
 
@@ -588,3 +588,8 @@ This fork uses build 114. Compilation, the full regression preflight, arm64 sign
 Build 114 validation passed on [GitHub Actions](https://github.com/zwthys-cyber/WQFiles/actions/runs/44905889912), source `f6fa008`: full regression preflight, strict arm64 syntax/link checks, IPA signature/package checks, and disposable UIKit navigation, background/foreground and relaunch recovery. The parallel checkpoint fixture now requests at least two workers; the UIKit fixture uses deterministic measurement slices and initializes the same lifecycle observer bootstrap as production. These test adjustments retain the assertions and do not change production scan timing.
 
 Download this fork's [0.9.19 (114) release](https://github.com/zwthys-cyber/WQFiles/releases/tag/v0.9.19-build114) and re-sign with the working App Group configuration. Device container access is not verified by the cloud tests.
+
+
+## Fork build 115: built-in push cache inspector
+
+The read-only Douyin push-cache inspector is bundled with the app and available under a selected plist's **Open As → Custom Inspector…** without ZIP sharing or the document picker. It reports only cached token presence, a validated numeric version and an upload timestamp; it does not display token contents, unrelated preference keys or login data, and makes no file or network changes. Existing user-installed inspectors with the same name take precedence and are never overwritten. The bundled script is validated with binary/XML fixtures in the real JavaScriptCore runner and checked in the staged IPA. This bypasses the reported Files picker stall; it does not claim the system picker itself is repaired.

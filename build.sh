@@ -127,6 +127,7 @@ if compgen -G "$ROOT/themes/*.wqtheme" >/dev/null; then
     mkdir -p "$APP/Themes"
     cp "$ROOT"/themes/*.wqtheme "$APP/Themes/"
 fi
+cp -R "$ROOT/bundled-inspectors" "$APP/BundledInspectors"
 plutil -convert binary1 "$APP/Info.plist"
 codesign -f -s - --entitlements entitlements.plist "$APP"
 
@@ -142,6 +143,8 @@ validate_app() {
         fail "build version does not match source metadata"
     [[ "$(plist_value MinimumOSVersion "$app_path/Info.plist")" == "$EXPECTED_MINIMUM_OS" ]] || \
         fail "minimum OS does not match source metadata"
+    [[ -f "$app_path/BundledInspectors/DouyinPush/manifest.json" && -f "$app_path/BundledInspectors/DouyinPush/inspect.js" ]] || \
+        fail "built-in push inspector is missing"
     codesign --verify --deep --strict "$app_path"
     local signed_entitlements
     signed_entitlements=$(codesign -d --entitlements :- "$app_path" 2>&1) || \

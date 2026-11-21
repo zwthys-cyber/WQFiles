@@ -1791,7 +1791,7 @@ static void wq_open_inspectors_folder(UINavigationController *nav)
 
 static NSString *wq_inspectors_summary(void)
 {
-    NSUInteger n = wq_inspectors_in(wq_inspectors_folder(), NULL).count;
+    NSUInteger n = wq_available_inspectors(wq_inspectors_folder(), [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"BundledInspectors"], NULL).count;
     return n ? [NSNumberFormatter localizedStringFromNumber:@(n) numberStyle:NSNumberFormatterDecimalStyle] : WQLocalized(@"None");
 }
 
@@ -1827,7 +1827,7 @@ static void wq_open_custom_inspector(UIViewController *host, NSString *path, UIV
 {
     NSString *folder = wq_inspectors_folder();
     NSArray<NSString *> *problems = nil;
-    NSArray<WQInspector *> *all = wq_inspectors_in(folder, &problems);
+    NSArray<WQInspector *> *all = wq_available_inspectors(folder, [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"BundledInspectors"], &problems);
     for (NSString *p in problems) wq_log(@"inspectors: skipped %@", p);
     UINavigationController *nav = host.navigationController;
     void (^open)(WQInspector *) = ^(WQInspector *inspector) {

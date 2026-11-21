@@ -134,6 +134,7 @@ class StagedBuildTests(unittest.TestCase):
             project.mkdir()
             for name in ("build.sh", "Info.plist", "entitlements.plist"):
                 shutil.copy2(ROOT / name, project / name)
+            shutil.copytree(ROOT / "bundled-inspectors", project / "bundled-inspectors")
             (project / "icons").mkdir()
             for name in ("AppIcon1024.png", "AppIcon1024-dark.png", "AppIcon1024-tinted.png"):
                 (project / "icons" / name).write_bytes(b"fixture icon")
@@ -152,6 +153,7 @@ class StagedBuildTests(unittest.TestCase):
         project.mkdir()
         for name in ("build.sh", "Info.plist", "entitlements.plist"):
             shutil.copy2(ROOT / name, project / name)
+        shutil.copytree(ROOT / "bundled-inspectors", project / "bundled-inspectors")
         (project / "icons").mkdir()
         for name in ("AppIcon1024.png", "AppIcon1024-dark.png", "AppIcon1024-tinted.png"):
             (project / "icons" / name).write_bytes(b"fixture icon")

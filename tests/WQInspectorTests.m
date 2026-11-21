@@ -134,6 +134,33 @@ int main(void)
         NSArray *left = [fm contentsOfDirectoryAtPath:inspectors error:nil];
         check(left.count == 2 && ![[left componentsJoinedByString:@","] containsString:@".wq-install"], @"refused installs leave nothing behind");
 
+        // Bundled availability needs no document picker and never modifies installed scripts.
+        NSString *bundleRoot = [base stringByAppendingPathComponent:@"bundled"];
+        NSString *userRoot = [base stringByAppendingPathComponent:@"users"];
+        NSString *bundled = makeInspector(@"bundled/Default", @{ @"name": @"Default", @"api": @1, @"extensions": @[@"plist"] }, @"function inspect(){return {sections:[{text:'bundled'}]}}", nil);
+        check(wq_available_inspectors(userRoot, bundleRoot, NULL).count == 1, @"bundled inspector is available without importing anything");
+        NSString *override = makeInspector(@"users/Override", @{ @"name": @"Default", @"api": @1, @"extensions": @[@"plist"] }, @"function inspect(){return {sections:[{text:'user'}]}}", nil);
+        NSData *bundledBefore = [NSData dataWithContentsOfFile:[bundled stringByAppendingPathComponent:@"inspect.js"]];
+        NSArray<WQInspector *> *available = wq_available_inspectors(userRoot, bundleRoot, NULL);
+        check(available.count == 1 && [available.firstObject.folder isEqualToString:override], @"installed inspector takes precedence without duplicates");
+        check([[NSData dataWithContentsOfFile:[bundled stringByAppendingPathComponent:@"inspect.js"]] isEqual:bundledBefore], @"availability does not modify bundled scripts");
+        check(wq_available_inspectors(userRoot, nil, NULL).count == 1, @"missing bundled location preserves user-installed inspectors");
+
+        NSString *actual = [NSFileManager.defaultManager.currentDirectoryPath stringByAppendingPathComponent:@"bundled-inspectors/DouyinPush"];
+        WQInspector *push = wq_inspector_load(actual, &error);
+        check(push != nil && [push matchesFileName:@"com.ss.iphone.ugc.Aweme.plist"], @"shipped push inspector loads and matches preference files");
+        NSDictionary *preferences = @{ @"BDUGPushDeviceToken": @"PRIVATE-PUSH-TOKEN", @"BDUGPushVersionCodeKey": @"412021", @"BDUGPushUploadTokenTimestampKey": @1795250000, @"session_key": @"PRIVATE-SESSION", @"phone_number": @"PRIVATE-PHONE" };
+        for (NSNumber *format in @[@(NSPropertyListBinaryFormat_v1_0), @(NSPropertyListXMLFormat_v1_0)]) {
+            NSData *bytes = [NSPropertyListSerialization dataWithPropertyList:preferences format:format.unsignedIntegerValue options:0 error:nil];
+            WQInspectorResult *inspected = wq_inspector_run(push, bytes, NO, @"preferences.plist", bytes.length, 1.0, NULL, &error);
+            NSString *report = inspected.plainText;
+            check(inspected && [report containsString:@"412021"] && [report containsString:@"UTC"], @"real JavaScriptCore runtime handles binary and XML preference snapshots");
+            check(![report containsString:@"PRIVATE"] && ![report containsString:@"session_key"] && ![report containsString:@"phone_number"], @"bundled report does not disclose push tokens or login data");
+            check(inspected.log.count == 0, @"bundled inspector logs no source data");
+            WQInspectorResult *truncated = wq_inspector_run(push, bytes, YES, @"preferences.plist", bytes.length, 1.0, NULL, &error);
+            check([truncated.plainText containsString:@"未解析"] && ![truncated.plainText containsString:@"PRIVATE"], @"truncated input produces no partial credential data");
+        }
+
         [NSFileManager.defaultManager removeItemAtPath:base error:nil];
         printf("All inspector tests passed.\n");
     }
