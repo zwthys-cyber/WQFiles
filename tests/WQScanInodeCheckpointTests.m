@@ -46,7 +46,9 @@ int main(int argc, const char *argv[])
         if (argc > 1) {
             mode = @(argv[1]);
             fsid_t fsid = {{1, 2}};
-            NSArray *found = wq_scan_children(fsid, 1, 65536, @[@"/checkpoint-root"], nil, QOS_CLASS_UTILITY, NO,
+            // This fixture intentionally blocks one worker until another commits.
+            // Full-scan mode guarantees at least two workers on small CI hosts.
+            NSArray *found = wq_scan_children(fsid, 1, 65536, @[@"/checkpoint-root"], nil, QOS_CLASS_UTILITY, YES,
                 ^(int64_t __unused done, int64_t __unused total, const NSUInteger *__unused counts) {
                     if ([mode hasSuffix:@"crash"]) _exit(25);
                 }, nil);

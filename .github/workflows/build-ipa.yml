@@ -10,6 +10,8 @@ jobs:
   build:
     runs-on: macos-26
     timeout-minutes: 45
+    env:
+      WQ_TEST_TIMEOUT: 180
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Show build environment
